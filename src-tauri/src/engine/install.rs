@@ -618,6 +618,9 @@ pub struct DeleteReport {
     pub freed: u64,
     /// 实际删掉的目录，方便在提示里说清楚
     pub removed: Vec<String>,
+    /// 删除前自动留的存档备份（文件名）。玩家点过确认了，
+    /// 但手滑总得有后悔药——备份失败不拦删除，只在报告里如实说没有。
+    pub saves_backup: Option<String>,
 }
 
 /// 删除一个版本及其私有游戏目录。
@@ -645,6 +648,12 @@ pub fn delete(state: &AppState, id: &str) -> Result<DeleteReport> {
         return Err(Error::msg(format!("版本 {id} 不存在")));
     }
 
+    // 有存档就先备一份（尽力而为：磁盘满/占用失败不拦删除）
+    let saves_backup = crate::engine::backup::create(&state.paths, id)
+        .ok()
+        .flatten()
+        .map(|info| info.file);
+
     let mut removed = Vec::new();
     let mut freed = dir_size(&dir);
     std::fs::remove_dir_all(&dir)?;
@@ -665,7 +674,103 @@ pub fn delete(state: &AppState, id: &str) -> Result<DeleteReport> {
         version: id.to_string(),
         freed,
         removed,
+        saves_backup,
     })
+}
+
+/// 校验复制/重命名时玩家给的新版本 id：字符安全 + 不与现有版本重名。
+fn validate_new_id(state: &AppState, id: &str) -> Result<String> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.contains("..")
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.starts_with('.')
+    {
+        return Err(Error::msg(format!(
+            "版本名不合法（不能有点开头、路径分隔符或冒号）：{id}"
+        )));
+    }
+    if state.paths.version_dir(id).exists() {
+        return Err(Error::msg(format!("已经有叫「{id}」的版本了，换一个名字")));
+    }
+    Ok(id.to_string())
+}
+
+/// 递归复制目录。符号链接直接跳过（版本目录里不该有，防环）。
+fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else if file_type.is_symlink() {
+            continue;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// 复制版本：整份 `versions/<id>/`（含 mods、config、存档）拷成新 id。
+///
+/// 「折腾整合包前先复制一份」是刚需：副本与原件共用底层原版文件
+/// （libraries/assets 是全局的），实际多占的只有版本目录本身。
+pub fn copy(state: &AppState, src: &str, new_id: &str) -> Result<String> {
+    let src = src.trim();
+    let new_id = validate_new_id(state, new_id)?;
+    let from = state.paths.version_dir(src);
+    if !from.is_dir() {
+        return Err(Error::msg(format!("版本 {src} 不存在")));
+    }
+    let to = state.paths.version_dir(&new_id);
+    copy_dir_all(&from, &to)?;
+    // json 的 id 字段与文件名要跟新 id 对上（失败则回滚整个副本，不留半成品）
+    if let Err(err) = retarget_json_and_jar(&to, src, &new_id) {
+        let _ = std::fs::remove_dir_all(&to);
+        return Err(err);
+    }
+    Ok(new_id)
+}
+
+/// 重命名版本：目录改名 + 内部文件与 json 的 id 改写。
+/// 底层的 inheritsFrom 指向不变（本来就指向共享的原版）。
+pub fn rename(state: &AppState, src: &str, new_id: &str) -> Result<String> {
+    let src = src.trim();
+    let new_id = validate_new_id(state, new_id)?;
+    let from = state.paths.version_dir(src);
+    if !from.is_dir() {
+        return Err(Error::msg(format!("版本 {src} 不存在")));
+    }
+    // rehome 干的就是"目录搬家 + json/jar 改名"这套（Forge 归化在用）
+    crate::engine::forge::rehome(&state.paths, src, &new_id)?;
+    // 整合包的实例记录跟着改名（只是元数据，失败不拦）
+    let instance = state.paths.instances().join(src);
+    if instance.is_dir() {
+        let _ = std::fs::rename(&instance, state.paths.instances().join(&new_id));
+    }
+    Ok(new_id)
+}
+
+/// 把目录里 `<old>.json`/`<old>.jar` 改成 `<new>.*`，并改写 json 的 id 字段。
+fn retarget_json_and_jar(dir: &Path, old: &str, new: &str) -> Result<()> {
+    let old_json = dir.join(format!("{old}.json"));
+    if old_json.is_file() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&old_json)?)?;
+        json["id"] = serde_json::Value::String(new.to_string());
+        std::fs::write(dir.join(format!("{new}.json")), serde_json::to_string_pretty(&json)?)?;
+        let _ = std::fs::remove_file(&old_json);
+    }
+    let old_jar = dir.join(format!("{old}.jar"));
+    if old_jar.is_file() {
+        std::fs::rename(&old_jar, dir.join(format!("{new}.jar")))?;
+    }
+    Ok(())
 }
 
 /// 把一个版本目录读成一条展示记录；缺 json 的目录返回 `None`。

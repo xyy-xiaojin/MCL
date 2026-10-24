@@ -61,6 +61,28 @@ export interface DeleteReport {
   version: string;
   freed: number;
   removed: string[];
+  /** 删除前自动留的存档备份文件名；null = 没有存档或备份失败 */
+  savesBackup: string | null;
+}
+
+/** 一份存档备份。 */
+export interface SavesBackup {
+  /** zip 文件名（还原/删除的标识） */
+  file: string;
+  /** 备份时刻（unix 毫秒） */
+  at: number;
+  /** 体积（字节） */
+  bytes: number;
+}
+
+/** 一条 mod 诊断结论。 */
+export interface ModIssue {
+  /** error（进游戏会出问题）/ warning（可能有坑） */
+  level: "error" | "warning";
+  /** 涉及的 mod 文件名 */
+  file: string;
+  /** 人话结论 */
+  message: string;
 }
 
 export type ItemState = "pending" | "running" | "done" | "failed" | "cancelled";
@@ -171,13 +193,19 @@ export interface AuthProfileChoice {
 
 /** 当前账户（后端已脱敏，没有 token）。 */
 export interface AuthAccountView {
-  kind: "offline" | "authlib" | string;
+  kind: "offline" | "authlib" | "microsoft" | string;
   serverUrl: string;
   serverName: string;
   loginEmail: string;
   profileId: string;
   profileName: string;
   loggedIn: boolean;
+}
+
+/** 多账户状态：列表 + 活跃下标（null = 离线模式）。 */
+export interface AuthStatusView {
+  accounts: AuthAccountView[];
+  activeIndex: number | null;
 }
 
 /** 登录结果。`profiles` 非空 = 账号下有多个角色，先选一个。 */

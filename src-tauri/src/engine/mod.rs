@@ -22,6 +22,7 @@
 //! - [`netplay`]：联机（EasyTier 组网 / 端口映射直连 / 樱花 FRP 隧道）
 
 pub mod auth;
+pub mod backup;
 pub mod browse;
 pub mod disk;
 pub mod download;
@@ -37,6 +38,7 @@ pub mod memory;
 pub mod meta;
 pub mod modpack;
 pub mod mods;
+pub mod moddiag;
 pub mod net;
 pub mod netplay;
 pub mod queue;

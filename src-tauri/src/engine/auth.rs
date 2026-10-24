@@ -81,18 +81,6 @@ impl Account {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, paths: &Paths) -> Result<()> {
-        paths.ensure()?;
-        let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(paths.root.join("account.json"), bytes)?;
-        Ok(())
-    }
-
-    /// 登出：删掉账户文件，回到离线模式。
-    pub fn clear(paths: &Paths) {
-        let _ = std::fs::remove_file(paths.root.join("account.json"));
-    }
-
     /// 是不是已就绪的登录账户（有 token、选好了角色）。
     pub fn active(&self) -> bool {
         (self.kind == KIND_AUTHLIB || self.kind == KIND_MICROSOFT)
@@ -110,6 +98,129 @@ impl Account {
             profile_id: self.profile_id.clone(),
             profile_name: self.profile_name.clone(),
             logged_in: self.active(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 多账户存储：accounts.json（列表 + 活跃下标）
+//
+// 离线模式不进列表——它就是"没有账户"的兜底（用户名在 settings 里），
+// 列表里只放皮肤站/微软这类有凭据的账户。切换到离线 = active 置空。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AccountStore {
+    pub accounts: Vec<Account>,
+    /// 当前活跃账户的下标；None = 离线模式
+    pub active: Option<usize>,
+}
+
+/// 给前端的状态视图（脱敏）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatusView {
+    pub accounts: Vec<AccountView>,
+    pub active_index: Option<usize>,
+}
+
+impl AccountStore {
+    fn file(paths: &Paths) -> std::path::PathBuf {
+        paths.root.join("accounts.json")
+    }
+
+    /// 读 + 旧版单账户文件（account.json）自动迁移。
+    pub fn load(paths: &Paths) -> Self {
+        let mut store: AccountStore = std::fs::read(Self::file(paths))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+
+        // 迁移：0.03 时代是单账户 account.json
+        if !std::fs::read(Self::file(paths))
+            .map(|b| !b.is_empty())
+            .unwrap_or(false)
+        {
+            let legacy = Account::load(paths);
+            if legacy.active() {
+                store.accounts = vec![legacy.clone()];
+                store.active = Some(0);
+                let _ = store.save(paths);
+                // 旧文件改名留档，不再被读
+                let _ = std::fs::rename(
+                    paths.root.join("account.json"),
+                    paths.root.join("account.json.migrated"),
+                );
+            }
+        }
+        store.repair();
+        store
+    }
+
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        paths.ensure()?;
+        let bytes = serde_json::to_vec_pretty(self)?;
+        std::fs::write(Self::file(paths), bytes)?;
+        Ok(())
+    }
+
+    /// 下标越界（手动编辑/删除账户后）时收敛到合法范围。
+    fn repair(&mut self) {
+        if self.accounts.is_empty() {
+            self.active = None;
+        } else if let Some(index) = self.active {
+            if index >= self.accounts.len() {
+                self.active = Some(self.accounts.len() - 1);
+            }
+        }
+    }
+
+    /// 当前活跃账户（None 时返回离线兜底）。
+    pub fn active_account(&self) -> Account {
+        match self.active.and_then(|i| self.accounts.get(i)) {
+            Some(account) => account.clone(),
+            None => Account::default(),
+        }
+    }
+
+    /// 插入或更新一个账户并设为活跃。同一账户（kind + 服务器 + 角色）只留一份。
+    /// 返回它在列表里的下标。
+    pub fn upsert_active(&mut self, account: Account) -> usize {
+        let index = self
+            .accounts
+            .iter()
+            .position(|a| {
+                a.kind == account.kind
+                    && a.server_url == account.server_url
+                    && a.profile_id == account.profile_id
+            })
+            .unwrap_or_else(|| {
+                self.accounts.push(account.clone());
+                self.accounts.len() - 1
+            });
+        self.accounts[index] = account;
+        self.active = Some(index);
+        index
+    }
+
+    /// 移除活跃账户，活跃自动落到列表剩余的最后一个（空了就是离线）。
+    pub fn remove_active(&mut self) {
+        if let Some(index) = self.active {
+            if index < self.accounts.len() {
+                self.accounts.remove(index);
+            }
+        }
+        self.repair();
+        if self.accounts.is_empty() {
+            self.active = None;
+        }
+    }
+
+    pub fn view(&self) -> AuthStatusView {
+        AuthStatusView {
+            accounts: self.accounts.iter().map(|a| a.view()).collect(),
+            active_index: self.active,
         }
     }
 }
@@ -358,7 +469,9 @@ pub async fn login(
         Some(profile) => {
             account.profile_id = crate::engine::skin::normalize_uuid(&profile.id);
             account.profile_name = profile.name;
-            account.save(paths)?;
+            let mut store = AccountStore::load(paths);
+            store.upsert_active(account.clone());
+            store.save(paths)?;
             Ok(LoginOutcome {
                 account: account.view(),
                 profiles: Vec::new(),
@@ -367,14 +480,18 @@ pub async fn login(
         None if profiles.is_empty() => {
             // token 已经到手但没有角色，也照常保存——账号本身没问题，
             // 只是得去皮肤站注册一个角色再回来刷新
-            account.save(paths)?;
+            let mut store = AccountStore::load(paths);
+            store.upsert_active(account.clone());
+            store.save(paths)?;
             Err(Error::msg(
                 "登录成功，但这个账号还没有游戏角色。先去皮肤站创建一个角色",
             ))
         }
         None => {
             // 多角色：先存 token，选完角色再补 profile 字段
-            account.save(paths)?;
+            let mut store = AccountStore::load(paths);
+            store.upsert_active(account.clone());
+            store.save(paths)?;
             Ok(LoginOutcome {
                 account: account.view(),
                 profiles,
@@ -390,7 +507,8 @@ pub async fn select_profile(
     profile_name: &str,
 ) -> Result<AccountView> {
     let _guard = state.account_lock.lock().await;
-    let mut account = Account::load(&state.paths);
+    let mut store = AccountStore::load(&state.paths);
+    let mut account = store.active_account();
     if account.kind != KIND_AUTHLIB || account.access_token.is_empty() {
         return Err(Error::msg("还没有登录皮肤站"));
     }
@@ -402,14 +520,18 @@ pub async fn select_profile(
     if account.profile_name.is_empty() {
         return Err(Error::msg("角色名不能为空"));
     }
-    account.save(&state.paths)?;
+    let index = store.upsert_active(account.clone());
+    store.save(&state.paths)?;
+    let _ = index;
     Ok(account.view())
 }
 
-/// 登出：尽力通知皮肤站作废 token（失败不拦——本地清了才算数）。
+/// 登出：移除当前活跃账户（尽力通知皮肤站作废 token，失败不拦）。
+/// 列表里还有别的账户就自动切过去，空了回到离线模式。
 pub async fn logout(state: &AppState) -> Result<()> {
     let _guard = state.account_lock.lock().await;
-    let account = Account::load(&state.paths);
+    let mut store = AccountStore::load(&state.paths);
+    let account = store.active_account();
     if account.kind == KIND_AUTHLIB && !account.access_token.is_empty() {
         let _ = state
             .client
@@ -422,7 +544,8 @@ pub async fn logout(state: &AppState) -> Result<()> {
             .send()
             .await;
     }
-    Account::clear(&state.paths);
+    store.remove_active();
+    store.save(&state.paths)?;
     Ok(())
 }
 
@@ -430,10 +553,11 @@ pub async fn logout(state: &AppState) -> Result<()> {
 /// 持账户锁跑完整个「读 → validate/refresh → 写回」事务。
 pub async fn ensure_token(state: &AppState) -> Result<Account> {
     let _guard = state.account_lock.lock().await;
-    let account = Account::load(&state.paths);
+    let mut store = AccountStore::load(&state.paths);
+    let account = store.active_account();
     // ensure_microsoft 也在锁内跑（本函数已持锁，不能重入）
     if account.kind == KIND_MICROSOFT {
-        return ensure_microsoft(state, account).await;
+        return ensure_microsoft(state, &mut store, account).await;
     }
     if account.kind != KIND_AUTHLIB {
         return Ok(account);
@@ -486,7 +610,8 @@ pub async fn ensure_token(state: &AppState) -> Result<Account> {
     }
     let mut renewed = account;
     renewed.access_token = body.access_token;
-    renewed.save(&state.paths)?;
+    store.upsert_active(renewed.clone());
+    store.save(&state.paths)?;
     Ok(renewed)
 }
 
@@ -819,7 +944,9 @@ pub async fn ms_poll(state: &AppState, device_code: &str) -> Result<MsPoll> {
         ms_refresh_token: refresh_token,
         ..Account::default()
     };
-    account.save(&state.paths)?;
+    let mut store = AccountStore::load(&state.paths);
+    store.upsert_active(account.clone());
+    store.save(&state.paths)?;
     Ok(MsPoll::Done {
         account: account.view(),
     })
@@ -986,7 +1113,12 @@ async fn ms_exchange_chain(
 
 /// 微软账户的启动前续期：先试现有 MC token（24 小时有效），失效就用
 /// refresh_token 重走一遍换票链。密码从不参与——refresh_token 活得比会话久。
-async fn ensure_microsoft(state: &AppState, account: Account) -> Result<Account> {
+/// 调用方（ensure_token）已持账户锁并传入 store，写回直接进列表。
+async fn ensure_microsoft(
+    state: &AppState,
+    store: &mut AccountStore,
+    account: Account,
+) -> Result<Account> {
     if account.access_token.is_empty() || account.profile_id.is_empty() {
         return Err(Error::msg(
             "微软正版账号还没有完成登录，请到首页重新登录",
@@ -1051,7 +1183,8 @@ async fn ensure_microsoft(state: &AppState, account: Account) -> Result<Account>
     let mut renewed = account;
     renewed.access_token = mc_token;
     renewed.ms_refresh_token = refresh_token;
-    renewed.save(&state.paths)?;
+    store.upsert_active(renewed.clone());
+    store.save(&state.paths)?;
     Ok(renewed)
 }
 
@@ -1164,17 +1297,113 @@ mod tests {
     }
 
     #[test]
-    fn account_round_trip_and_active_check() {
-        let root = std::env::temp_dir().join(format!("mcl-auth-test-{}", std::process::id()));
+    fn account_store_upsert_dedup_and_remove() {
+        let root = std::env::temp_dir().join(format!("mcl-accounts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = Paths { root: root.clone() };
 
-        // 默认是离线
+        // 空库 = 离线
+        let mut store = AccountStore::load(&paths);
+        assert!(store.accounts.is_empty());
+        assert!(store.active.is_none());
+        assert_eq!(store.active_account().kind, KIND_OFFLINE);
+
+        // 第一个账户登录 → 活跃
+        let a = Account {
+            kind: KIND_AUTHLIB.to_string(),
+            server_url: "https://littleskin.cn/api/yggdrasil".into(),
+            server_name: "LittleSkin".into(),
+            login_email: "a@b.c".into(),
+            access_token: "t1".into(),
+            profile_id: "069a79f4-44e9-4726-a5be-fca90e38aaf5".into(),
+            profile_name: "Notch".into(),
+            ms_refresh_token: String::new(),
+        };
+        store.upsert_active(a.clone());
+        // 同一账户再登录（token 换新）→ 去重更新，不新增
+        let mut a2 = a.clone();
+        a2.access_token = "t2".into();
+        store.upsert_active(a2);
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.accounts[0].access_token, "t2");
+        assert_eq!(store.active, Some(0));
+
+        // 第二个账户（微软）→ 活跃切到 1
+        let b = Account {
+            kind: KIND_MICROSOFT.to_string(),
+            access_token: "ms".into(),
+            profile_id: "11111111-2222-4333-8444-555555555555".into(),
+            profile_name: "XboxGuy".into(),
+            ms_refresh_token: "r".into(),
+            ..Account::default()
+        };
+        store.upsert_active(b);
+        assert_eq!(store.accounts.len(), 2);
+        assert_eq!(store.active, Some(1));
+
+        // 存取往返
+        store.save(&paths).unwrap();
+        let reloaded = AccountStore::load(&paths);
+        assert_eq!(reloaded.accounts.len(), 2);
+        assert_eq!(reloaded.active, Some(1));
+        assert_eq!(reloaded.active_account().profile_name, "XboxGuy");
+
+        // 移除活跃（index 1）→ 收敛到剩下的
+        let mut reloaded = reloaded;
+        reloaded.remove_active();
+        assert_eq!(reloaded.accounts.len(), 1);
+        assert_eq!(reloaded.active, Some(0));
+        // 全删光 → 离线
+        reloaded.remove_active();
+        assert!(reloaded.accounts.is_empty());
+        assert!(reloaded.active.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_single_account_migrates() {
+        let root = std::env::temp_dir().join(format!("mcl-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = Paths { root: root.clone() };
+
+        // 旧版单账户文件
+        let legacy = r#"{
+            "kind": "authlib",
+            "serverUrl": "https://littleskin.cn/api/yggdrasil",
+            "serverName": "LittleSkin",
+            "loginEmail": "a@b.c",
+            "accessToken": "tok",
+            "profileId": "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+            "profileName": "Notch"
+        }"#;
+        std::fs::write(root.join("account.json"), legacy).unwrap();
+
+        let store = AccountStore::load(&paths);
+        assert_eq!(store.accounts.len(), 1, "旧账户应被迁移进列表");
+        assert_eq!(store.active, Some(0));
+        assert!(root.join("accounts.json").is_file());
+        // 旧文件改名留档
+        assert!(root.join("account.json.migrated").is_file());
+        assert!(!root.join("account.json").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn account_round_trip_and_active_check() {
+        let root = std::env::temp_dir().join(format!("mcl-auth-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = Paths { root: root.clone() };
+
+        // 没有旧文件时是离线
         let fresh = Account::load(&paths);
         assert_eq!(fresh.kind, KIND_OFFLINE);
         assert!(!fresh.active());
 
-        // 完整账户能存能读
+        // 旧版单账户格式能读回（迁移路径的读取端）
         let account = Account {
             kind: KIND_AUTHLIB.to_string(),
             server_url: "https://littleskin.cn/api/yggdrasil".to_string(),
@@ -1185,17 +1414,14 @@ mod tests {
             profile_name: "Notch".to_string(),
             ms_refresh_token: String::new(),
         };
-        account.save(&paths).unwrap();
+        let text = serde_json::to_string(&account).unwrap();
+        std::fs::write(root.join("account.json"), &text).unwrap();
         let loaded = Account::load(&paths);
         assert_eq!(loaded.login_email, "a@b.c");
         assert!(loaded.active());
         // 视图里绝不能有 token
-        let text = serde_json::to_string(&loaded.view()).unwrap();
-        assert!(!text.contains("tok"));
-
-        // 登出清文件
-        Account::clear(&paths);
-        assert_eq!(Account::load(&paths).kind, KIND_OFFLINE);
+        let view_text = serde_json::to_string(&loaded.view()).unwrap();
+        assert!(!view_text.contains("tok"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

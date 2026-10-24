@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import Icon from "../components/Icon.vue";
 import { api, errorText, humanSize } from "../api";
 import { importDropped, notify, state } from "../store";
-import type { ModEntry } from "../types";
+import type { ModEntry, ModIssue } from "../types";
 
 const mods = ref<ModEntry[]>([]);
 const loading = ref(false);
@@ -13,11 +13,35 @@ const busy = ref("");
 // 并发，后到的旧响应不能覆盖新列表（DownloadsView 的 requestSeq 同款防护）
 let loadSeq = 0;
 
+// ---- 诊断横幅：列表加载后顺手扫一遍，缺前置/冲突在启动前就亮出来 ----
+const issues = ref<ModIssue[]>([]);
+const issuesOpen = ref(false);
+const errorCount = computed(() => issues.value.filter((i) => i.level === "error").length);
+const warningCount = computed(() => issues.value.filter((i) => i.level === "warning").length);
+let diagSeq = 0;
+
+async function runDiagnostics() {
+  if (!state.selectedVersion) {
+    diagSeq++;
+    issues.value = [];
+    return;
+  }
+  const seq = ++diagSeq;
+  try {
+    const found = await api.modDiagnostics(state.selectedVersion);
+    if (seq === diagSeq) issues.value = found;
+  } catch {
+    // 诊断失败不影响列表使用，静默
+    if (seq === diagSeq) issues.value = [];
+  }
+}
+
 async function load() {
   // 版本隔离后 mod 是按版本分的：没选版本就没有"这个版本的 mod 列表"可看
   if (!state.selectedVersion) {
     loadSeq++;
     mods.value = [];
+    issues.value = [];
     return;
   }
   const seq = ++loadSeq;
@@ -26,6 +50,7 @@ async function load() {
     const list = await api.listMods(state.selectedVersion);
     if (seq === loadSeq) {
       mods.value = list;
+      void runDiagnostics();
     }
   } catch (e) {
     if (seq === loadSeq) {
@@ -113,6 +138,43 @@ watch(
       class="shrink-0 rounded-xl bg-surface-sunken px-3.5 py-2 font-mono text-[10px] text-ink-400"
     >
       mods 目录：{{ state.paths.mods || "先在上方选择一个版本" }}
+    </div>
+
+    <!-- 诊断横幅：有问题才出现，可折叠 -->
+    <div
+      v-if="issues.length"
+      class="shrink-0 rounded-xl border px-4 py-3"
+      :class="
+        errorCount
+          ? 'border-rose-500/25 bg-rose-500/[0.08]'
+          : 'border-amber-500/25 bg-amber-500/[0.08]'
+      "
+    >
+      <button
+        class="flex w-full items-center gap-2 text-left text-[13px] font-bold"
+        :class="errorCount ? 'text-rose-200' : 'text-amber-100'"
+        @click="issuesOpen = !issuesOpen"
+      >
+        <Icon :name="errorCount ? 'close' : 'shield'" :size="15" />
+        {{ errorCount ? `${errorCount} 个问题会导致进游戏失败` : `${warningCount} 个潜在冲突` }}
+        <span class="ml-auto text-[10px] font-semibold opacity-70">
+          {{ issuesOpen ? "收起" : "展开" }}
+        </span>
+      </button>
+      <div v-if="issuesOpen" class="mt-2 space-y-1.5">
+        <div
+          v-for="(issue, index) in issues"
+          :key="index"
+          class="flex items-start gap-2 text-[11px] leading-relaxed"
+          :class="issue.level === 'error' ? 'text-rose-100/90' : 'text-amber-100/90'"
+        >
+          <span
+            class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full"
+            :class="issue.level === 'error' ? 'bg-rose-400' : 'bg-amber-400'"
+          />
+          {{ issue.message }}
+        </div>
+      </div>
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto pr-1">

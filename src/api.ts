@@ -13,8 +13,10 @@ import type {
   AuthAccountView,
   AuthLoginResult,
   AuthServerInfo,
+  AuthStatusView,
   BrowseHit,
   DeleteReport,
+  SavesBackup,
   MsDeviceCode,
   MsPollResult,
   ExportOptions,
@@ -28,6 +30,7 @@ import type {
   LocalVersion,
   MemoryView,
   ModEntry,
+  ModIssue,
   FrpTunnel,
   LanInfo,
   ModpackHit,
@@ -62,6 +65,21 @@ export const api = {
   listLocalVersions: () => call<LocalVersion[]>("list_local_versions"),
   installVersion: (id: string) => call<InstallReport>("install_version", { id }),
   deleteVersion: (id: string) => call<DeleteReport>("delete_version", { id }),
+  copyVersion: (id: string, newId: string) =>
+    call<string>("copy_version", { id, newId }),
+  renameVersion: (id: string, newId: string) =>
+    call<string>("rename_version", { id, newId }),
+  /** 校验并补齐缺失/损坏的游戏文件（不碰存档和 mod） */
+  repairVersion: (id: string) => call<InstallReport>("repair_version", { id }),
+  // 存档备份
+  backupList: (versionId: string) =>
+    call<SavesBackup[]>("backup_list", { versionId }),
+  backupCreate: (versionId: string) =>
+    call<SavesBackup | null>("backup_create", { versionId }),
+  backupRestore: (versionId: string, file: string) =>
+    call<void>("backup_restore", { versionId, file }),
+  backupRemove: (versionId: string, file: string) =>
+    call<void>("backup_remove", { versionId, file }),
   launchVersion: (id: string) => call<LaunchReport>("launch_version", { id }),
 
   // 运行环境
@@ -149,6 +167,9 @@ export const api = {
   listMods: (versionId: string) => call<ModEntry[]>("list_mods", { versionId }),
   toggleMod: (versionId: string, fileName: string) =>
     call<boolean>("toggle_mod", { versionId, fileName }),
+  /** 缺前置 / 版本不匹配 / 冲突检测（读 jar 元数据，不联网） */
+  modDiagnostics: (versionId: string) =>
+    call<ModIssue[]>("mod_diagnostics", { versionId }),
 
   // 杂项
   appPaths: (versionId?: string) =>
@@ -187,7 +208,10 @@ export const api = {
   resetSkin: () => call<null>("reset_skin"),
 
   // 皮肤站账户（authlib-injector / yggdrasil）
-  authStatus: () => call<AuthAccountView>("auth_status"),
+  authStatus: () => call<AuthStatusView>("auth_status"),
+  /** 切换活跃账户；index 传 null 切回离线模式 */
+  authSetActive: (index: number | null) =>
+    call<AuthStatusView>("auth_set_active", { index }),
   /** 验证皮肤站地址并拉元数据（「测试连接」） */
   authServerInfo: (serverUrl: string) =>
     call<AuthServerInfo>("auth_server_info", { serverUrl }),

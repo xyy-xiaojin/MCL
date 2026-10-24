@@ -89,6 +89,14 @@ impl Paths {
         self.root.join("netplay")
     }
 
+    /// 存档备份。`backups/<版本id>/<时间戳>.zip`。
+    ///
+    /// 删版本前自动备一份、玩家也能手动备份/还原——存档是唯一
+    /// 删了就找不回的东西，值得一个专门的目录。
+    pub fn backups(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
     /// 游戏日志。`logs/<版本>/<启动时间>.log`。
     ///
     /// 之前游戏输出只推给前端，关窗口就没了——崩溃后没有任何现场，

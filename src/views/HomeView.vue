@@ -17,8 +17,8 @@ import {
   state,
 } from "../store";
 import type {
-  AuthAccountView,
   AuthProfileChoice,
+  AuthStatusView,
   MsDeviceCode,
 } from "../types";
 
@@ -150,15 +150,15 @@ function runningMinutes(startedAtMs: number): string {
   return `${Math.floor(mins / 60)} 小时 ${mins % 60} 分`;
 }
 
-// ---- 账户：离线 / 皮肤站（authlib-injector）/ 微软正版 ----
+// ---- 账户：离线 / 皮肤站（authlib-injector）/ 微软正版，多账户切换 ----
 
 /** 预置皮肤站。自定义地址填 URL，后端会先验元数据再登录。 */
 const PRESET_SERVERS = [
   { label: "LittleSkin", url: "https://littleskin.cn/api/yggdrasil" },
 ];
 
-const auth = ref<AuthAccountView | null>(null);
-const accountTab = ref<"offline" | "authlib" | "ms">("offline");
+/** 多账户状态（列表 + 活跃下标；离线不占列表位） */
+const auth = ref<AuthStatusView | null>(null);
 const busyAuth = ref(false);
 const serverChoice = ref<string>(PRESET_SERVERS[0].url);
 const customServer = ref("");
@@ -180,28 +180,58 @@ onUnmounted(() => {
   msLoopId++;
 });
 
-onMounted(async () => {
+async function refreshAuthStatus() {
   try {
     auth.value = await api.authStatus();
-    if (auth.value.kind === "authlib") accountTab.value = "authlib";
-    if (auth.value.kind === "microsoft") accountTab.value = "ms";
   } catch {
     // 浏览器预览（无 Tauri 运行时）时静默
   }
+}
+
+/** 账户 tab：默认停在活跃账户对应的形态，没有就离线 */
+const accountTab = ref<"offline" | "authlib" | "ms">("offline");
+
+onMounted(async () => {
+  await refreshAuthStatus();
+  const kind = activeAccount.value?.kind;
+  if (kind === "authlib") accountTab.value = "authlib";
+  if (kind === "microsoft") accountTab.value = "ms";
 });
 
-const authLoggedIn = computed(
-  () =>
-    (auth.value?.kind === "authlib" || auth.value?.kind === "microsoft") &&
-    auth.value.loggedIn,
-);
+/** 当前活跃的登录账户（null = 离线模式） */
+const activeAccount = computed(() => {
+  const status = auth.value;
+  if (!status) return null;
+  return status.accounts[status.activeIndex ?? -1] ?? null;
+});
+
+const authLoggedIn = computed(() => Boolean(activeAccount.value?.loggedIn));
 
 /** 启动卡的身份角标 */
 const accountLabel = computed(() => {
   if (!authLoggedIn.value) return "离线模式";
-  if (auth.value?.kind === "microsoft") return "微软正版";
-  return `皮肤站 · ${auth.value?.serverName || "已登录"}`;
+  if (activeAccount.value?.kind === "microsoft") return "微软正版";
+  return `皮肤站 · ${activeAccount.value?.serverName || "已登录"}`;
 });
+
+/** 切换活跃账户（chips 点击）。`null` = 切回离线。 */
+async function switchAccount(index: number | null) {
+  if (busyAuth.value) return;
+  busyAuth.value = true;
+  try {
+    auth.value = await api.authSetActive(index);
+    const name = index === null ? "离线模式" : activeAccount.value?.profileName || "";
+    notify(`已切换到 ${name}`, "info");
+    await refreshAvatar();
+    const kind = activeAccount.value?.kind;
+    if (kind === "authlib") accountTab.value = "authlib";
+    else if (kind === "microsoft") accountTab.value = "ms";
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    busyAuth.value = false;
+  }
+}
 
 const activeServerUrl = computed(() =>
   serverChoice.value === "__custom__" ? customServer.value : serverChoice.value,
@@ -235,7 +265,7 @@ async function authLogin() {
       email.value.trim(),
       password.value,
     );
-    auth.value = result.account;
+    await refreshAuthStatus();
     if (result.profiles.length) {
       pendingProfiles.value = result.profiles;
       notify("登录成功，账号下有多个角色，请选一个", "info");
@@ -257,7 +287,8 @@ async function authLogin() {
 async function pickProfile(profile: AuthProfileChoice) {
   busyAuth.value = true;
   try {
-    auth.value = await api.authSelectProfile(profile.id, profile.name);
+    await api.authSelectProfile(profile.id, profile.name);
+    await refreshAuthStatus();
     pendingProfiles.value = [];
     password.value = "";
     notify(`角色「${profile.name}」已选中`, "success");
@@ -273,19 +304,16 @@ async function authLogout() {
   busyAuth.value = true;
   try {
     await api.authLogout();
-    auth.value = {
-      kind: "offline",
-      serverUrl: "",
-      serverName: "",
-      loginEmail: "",
-      profileId: "",
-      profileName: "",
-      loggedIn: false,
-    };
+    await refreshAuthStatus();
     pendingProfiles.value = [];
     msLoopId++;
     msDevice.value = null;
-    notify("已退出登录，回到离线模式", "info");
+    notify(
+      auth.value?.accounts.length
+        ? "已退出这个账户，已切到列表里的下一个"
+        : "已退出登录，回到离线模式",
+      "info",
+    );
     await refreshAvatar();
   } catch (e) {
     notify(errorText(e), "error");
@@ -336,7 +364,7 @@ async function msPollLoop(device: MsDeviceCode, myLoop: number) {
       if (result.state === "pending") continue;
       // done
       if (result.account) {
-        auth.value = result.account;
+        await refreshAuthStatus();
         msDevice.value = null;
         notify(`微软正版登录成功：${result.account.profileName}`, "success");
         await refreshAvatar();
@@ -502,6 +530,49 @@ function msCancel() {
           </span>
         </div>
 
+        <!-- 多账户切换：有登录账户时才出现；离线也是一格 -->
+        <div
+          v-if="auth && auth.accounts.length > 0"
+          class="mb-3 flex flex-wrap items-center gap-1.5"
+        >
+          <button
+            class="flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-[11px] font-bold transition-colors"
+            :class="
+              auth.activeIndex === null || auth.activeIndex === undefined
+                ? 'bg-brand-600 text-white'
+                : 'bg-surface-sunken text-ink-500 hover:text-white'
+            "
+            :disabled="busyAuth"
+            @click="switchAccount(null)"
+          >
+            <Icon name="home" :size="12" />
+            离线 · {{ state.settings.username }}
+          </button>
+          <button
+            v-for="(account, index) in auth.accounts"
+            :key="`${account.kind}-${account.profileId}`"
+            class="flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-[11px] font-bold transition-colors"
+            :class="
+              auth.activeIndex === index
+                ? 'bg-brand-600 text-white'
+                : 'bg-surface-sunken text-ink-500 hover:text-white'
+            "
+            :title="
+              account.kind === 'microsoft'
+                ? '微软正版'
+                : `${account.serverName}（${account.loginEmail}）`
+            "
+            :disabled="busyAuth"
+            @click="switchAccount(index)"
+          >
+            <span
+              class="h-1.5 w-1.5 rounded-full"
+              :class="account.loggedIn ? 'bg-emerald-400' : 'bg-amber-400'"
+            />
+            {{ account.profileName }}
+          </button>
+        </div>
+
         <!-- 模式切换 -->
         <div class="mb-4 flex gap-2 rounded-xl bg-white/[0.04] p-1">
           <button
@@ -543,7 +614,7 @@ function msCancel() {
         <!-- 皮肤站模式 -->
         <template v-if="accountTab === 'authlib'">
           <!-- 已登录：角色卡 -->
-          <div v-if="authLoggedIn" class="flex items-start gap-4">
+          <div v-if="authLoggedIn && activeAccount?.kind === 'authlib'" class="flex items-start gap-4">
             <SkinAvatar
               :size="64"
               :model="state.avatar.model"
@@ -551,10 +622,10 @@ function msCancel() {
             />
             <div class="min-w-0 flex-1">
               <div class="truncate text-lg font-extrabold text-white">
-                {{ auth?.profileName }}
+                {{ activeAccount?.profileName }}
               </div>
               <div class="mt-0.5 text-[11px] text-ink-400">
-                {{ auth?.serverName }}（{{ auth?.loginEmail }}）
+                {{ activeAccount?.serverName }}（{{ activeAccount?.loginEmail }}）
               </div>
               <button
                 class="btn-ghost mt-2 !px-2.5 !py-1.5 !text-[11px] text-ink-500 hover:bg-rose-500/[0.12] hover:text-rose-300"
@@ -651,7 +722,7 @@ function msCancel() {
         <!-- 微软正版模式 -->
         <template v-else-if="accountTab === 'ms'">
           <!-- 已登录：角色卡 -->
-          <div v-if="authLoggedIn && auth?.kind === 'microsoft'" class="flex items-start gap-4">
+          <div v-if="authLoggedIn && activeAccount?.kind === 'microsoft'" class="flex items-start gap-4">
             <SkinAvatar
               :size="64"
               :model="state.avatar.model"
@@ -659,10 +730,10 @@ function msCancel() {
             />
             <div class="min-w-0 flex-1">
               <div class="truncate text-lg font-extrabold text-white">
-                {{ auth?.profileName }}
+                {{ activeAccount?.profileName }}
               </div>
               <div class="mt-0.5 text-[11px] text-ink-400">
-                微软正版 · {{ auth?.loginEmail || "Minecraft 账号" }}
+                微软正版 · {{ activeAccount?.loginEmail || "Minecraft 账号" }}
               </div>
               <button
                 class="btn-ghost mt-2 !px-2.5 !py-1.5 !text-[11px] text-ink-500 hover:bg-rose-500/[0.12] hover:text-rose-300"

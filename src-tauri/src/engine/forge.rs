@@ -611,7 +611,7 @@ fn version_dirs(root: &Path) -> Vec<String> {
 /// 把安装器产出的版本目录归化成我们自己的 id：目录改名 + 内部文件改名 +
 /// JSON 的 id 字段改写。启动时按「版本 id 找 `<id>.jar`」，不改名会丢掉
 /// 补丁过的客户端 jar。
-fn rehome(paths: &crate::state::Paths, created: &str, target: &str) -> Result<()> {
+pub(crate) fn rehome(paths: &crate::state::Paths, created: &str, target: &str) -> Result<()> {
     let from = paths.version_dir(created);
     let to = paths.version_dir(target);
     // target 目录可能已被建出来过（空目录），先把内容并进去

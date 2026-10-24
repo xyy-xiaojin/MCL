@@ -5,7 +5,7 @@ import Icon from "../components/Icon.vue";
 import { LOADER_LABEL } from "../labels";
 import { api, errorText, humanSize } from "../api";
 import { notify, refreshLocal, refreshMemory, refreshRemote, state } from "../store";
-import type { LocalVersion } from "../types";
+import type { LocalVersion, SavesBackup } from "../types";
 
 const showOnline = ref(false);
 const showInstaller = ref(false);
@@ -46,7 +46,13 @@ async function remove(version: LocalVersion) {
   deleting.value = version.id;
   try {
     const report = await api.deleteVersion(version.id);
-    notify(`已删除 ${report.version}，释放 ${humanSize(report.freed)}`, "success");
+    const backupNote = report.savesBackup
+      ? `；存档已自动备份（版本卡的「备份」里可还原）`
+      : "";
+    notify(
+      `已删除 ${report.version}，释放 ${humanSize(report.freed)}${backupNote}`,
+      "success",
+    );
     const wasSelected = state.selectedVersion === version.id;
     await refreshLocal();
     // 远程清单的 installed 标志是按本地目录算的，删完要重拉一次，否则还显示"已安装"
@@ -229,6 +235,158 @@ function startVersion(id: string) {
   state.view = "home";
 }
 
+// ---- 版本卡「更多」菜单：复制 / 重命名（低频操作收进菜单，卡面保持简洁） ----
+
+const menuOpen = ref("");
+
+function toggleMenu(id: string) {
+  menuOpen.value = menuOpen.value === id ? "" : id;
+}
+
+/** 复制/重命名共用的小输入弹层 */
+const idEditor = ref<{
+  version: LocalVersion;
+  mode: "copy" | "rename";
+  value: string;
+} | null>(null);
+const idBusy = ref(false);
+
+function startCopy(version: LocalVersion) {
+  menuOpen.value = "";
+  idEditor.value = { version, mode: "copy", value: `${version.id}-copy` };
+}
+
+function startRename(version: LocalVersion) {
+  menuOpen.value = "";
+  idEditor.value = { version, mode: "rename", value: version.id };
+}
+
+const repairing = ref("");
+
+async function repairVersion(version: LocalVersion) {
+  menuOpen.value = "";
+  if (repairing.value) return;
+  const ok = window.confirm(
+    `校验并修复「${version.id}」的游戏文件？\n健康的文件会跳过、只重新下载缺失或损坏的；存档、mod、配置一律不动。`,
+  );
+  if (!ok) return;
+  repairing.value = version.id;
+  try {
+    const report = await api.repairVersion(version.id);
+    notify(`修复完成：校验 ${report.files} 个文件（完好的已跳过）`, "success");
+    await refreshLocal();
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    repairing.value = "";
+  }
+}
+
+async function applyIdEdit() {
+  const editor = idEditor.value;
+  if (!editor || idBusy.value) return;
+  idBusy.value = true;
+  try {
+    const newId = editor.value.trim();
+    if (!newId) {
+      notify("名字不能为空", "error");
+      return;
+    }
+    if (editor.mode === "copy") {
+      await api.copyVersion(editor.version.id, newId);
+      notify(`已复制为「${newId}」（原版未动，可以放心折腾副本）`, "success");
+    } else {
+      await api.renameVersion(editor.version.id, newId);
+      notify(`已改名为「${newId}」`, "success");
+    }
+    idEditor.value = null;
+    await refreshLocal();
+    await refreshRemote();
+    state.selectedVersion = newId;
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    idBusy.value = false;
+  }
+}
+
+// ---- 存档备份 ----
+//
+// 入口只有一个「备份」小按钮，弹层里看历史/立即备份/还原。
+// 有存档的版本卡片按钮上带个小红点提醒（存档 = 不可再生数据）。
+
+const backupTarget = ref<LocalVersion | null>(null);
+const backups = ref<SavesBackup[]>([]);
+const backupBusy = ref(false);
+
+function openBackups(version: LocalVersion) {
+  backupTarget.value = version;
+  backups.value = [];
+  void loadBackups();
+}
+
+async function loadBackups() {
+  if (!backupTarget.value) return;
+  try {
+    backups.value = await api.backupList(backupTarget.value.id);
+  } catch (e) {
+    notify(errorText(e), "error");
+  }
+}
+
+async function createBackup() {
+  if (!backupTarget.value || backupBusy.value) return;
+  backupBusy.value = true;
+  try {
+    const info = await api.backupCreate(backupTarget.value.id);
+    if (info) {
+      notify(`已备份（${humanSize(info.bytes)}）`, "success");
+    } else {
+      notify("这个版本还没有存档，没有可备份的内容", "info");
+    }
+    await loadBackups();
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    backupBusy.value = false;
+  }
+}
+
+async function restoreBackup(file: string) {
+  if (!backupTarget.value || backupBusy.value) return;
+  const ok = window.confirm(
+    `还原这份备份？\n当前的存档会先自动备份一份，还原错了还能再还原回来。`,
+  );
+  if (!ok) return;
+  backupBusy.value = true;
+  try {
+    await api.backupRestore(backupTarget.value.id, file);
+    await loadBackups();
+    notify("存档已还原（还原前的状态也留了一份备份）", "success");
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    backupBusy.value = false;
+  }
+}
+
+async function removeBackup(file: string) {
+  if (!backupTarget.value || backupBusy.value) return;
+  backupBusy.value = true;
+  try {
+    await api.backupRemove(backupTarget.value.id, file);
+    await loadBackups();
+  } catch (e) {
+    notify(errorText(e), "error");
+  } finally {
+    backupBusy.value = false;
+  }
+}
+
+function backupTime(at: number): string {
+  return new Date(at).toLocaleString();
+}
+
 // ---- 导出实例 ----
 //
 // 导出按"这个版本"来算，不是"当前选中的版本"：玩家可能想备份一个没在用的包，
@@ -405,12 +563,58 @@ async function installLoader(gameVersion: string, loader: string) {
             选择并启动
           </button>
           <button
+            class="btn-ghost relative !px-2.5 !py-2 !text-xs"
+            :title="version.hasSaves ? '备份 / 还原这个版本的存档' : '这个版本没有存档'"
+            @click="openBackups(version)"
+          >
+            <Icon name="package" :size="14" />
+            备份
+            <span
+              v-if="version.hasSaves"
+              class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-emerald-400"
+              title="有存档"
+            />
+          </button>
+          <button
             class="btn-ghost !px-2.5 !py-2 !text-xs"
             title="把这个版本打包成 zip（导出实例）"
             @click="openExport(version)"
           >
             导出
           </button>
+          <div class="relative">
+            <button
+              class="btn-ghost !px-2.5 !py-2 !text-xs"
+              title="复制 / 重命名"
+              @click="toggleMenu(version.id)"
+            >
+              <Icon name="settings" :size="15" />
+            </button>
+            <div
+              v-if="menuOpen === version.id"
+              class="absolute right-0 top-10 z-30 w-36 rounded-xl border border-line bg-surface p-1 shadow-pop"
+            >
+              <button
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                @click="startCopy(version)"
+              >
+                复制版本…
+              </button>
+              <button
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                @click="startRename(version)"
+              >
+                重命名…
+              </button>
+              <button
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                title="校验并补齐缺失/损坏的游戏文件，不碰存档和 mod"
+                @click="repairVersion(version)"
+              >
+                修复文件…
+              </button>
+            </div>
+          </div>
           <button
             class="btn-ghost !px-2.5 !py-2 !text-xs text-rose-400/80 hover:bg-rose-500/[0.14] hover:text-rose-300"
             title="删除这个版本"
@@ -688,6 +892,107 @@ async function installLoader(gameVersion: string, loader: string) {
         </span>
       </p>
     </section>
+
+    <!-- 复制/重命名的小输入弹层 -->
+    <div
+      v-if="idEditor"
+      class="fixed inset-0 z-[75] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
+      @click.self="idEditor = null"
+    >
+      <div class="w-full max-w-sm rounded-2xl border border-line bg-surface p-5 shadow-pop">
+        <div class="text-sm font-extrabold text-ink-900">
+          {{ idEditor.mode === "copy" ? "复制版本" : "重命名版本" }}
+        </div>
+        <p class="mt-1 truncate text-[11px] text-ink-400" :title="idEditor.version.id">
+          {{ idEditor.version.id }} · {{ humanSize(idEditor.version.size) }}
+        </p>
+        <input
+          v-model="idEditor.value"
+          class="field mt-4 w-full font-mono !text-xs"
+          maxlength="60"
+          placeholder="新版本名，例如 my-pack-v2"
+          @keyup.enter="applyIdEdit"
+        />
+        <p class="mt-2 text-[11px] leading-relaxed text-ink-400">
+          {{
+            idEditor.mode === "copy"
+              ? "会完整复制 mods、配置和存档；底层游戏文件是共享的，副本实际只多占版本目录本身。"
+              : "只改名字，内容原样保留。"
+          }}
+        </p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button class="btn-ghost !py-2 !text-xs" :disabled="idBusy" @click="idEditor = null">
+            取消
+          </button>
+          <button class="btn-primary !py-2 !text-xs" :disabled="idBusy" @click="applyIdEdit">
+            <Icon :name="idBusy ? 'refresh' : 'check'" :size="14" :class="idBusy ? 'animate-spin' : ''" />
+            {{ idBusy ? "处理中…" : idEditor.mode === "copy" ? "复制" : "改名" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 存档备份弹层 -->
+    <div
+      v-if="backupTarget"
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
+      @click.self="backupTarget = null"
+    >
+      <div class="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-pop">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-extrabold text-ink-900">存档备份</div>
+            <p class="mt-1 truncate text-[11px] text-ink-400" :title="backupTarget.id">
+              {{ backupTarget.id }}
+            </p>
+          </div>
+          <button class="btn-ghost !px-2 !py-1.5" title="关闭" @click="backupTarget = null">
+            <Icon name="close" :size="15" />
+          </button>
+        </div>
+
+        <div class="mt-4 max-h-64 space-y-1.5 overflow-y-auto pr-1">
+          <div
+            v-for="item in backups"
+            :key="item.file"
+            class="flex items-center gap-3 rounded-xl border border-line bg-white/[0.02] px-3 py-2"
+          >
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-xs font-semibold text-ink-900">
+                {{ backupTime(item.at) }}
+              </div>
+              <div class="mt-0.5 text-[10px] text-ink-400">{{ humanSize(item.bytes) }}</div>
+            </div>
+            <button
+              class="btn-outline !px-2.5 !py-1.5 !text-[11px]"
+              :disabled="backupBusy"
+              @click="restoreBackup(item.file)"
+            >
+              还原
+            </button>
+            <button
+              class="btn-ghost !px-2 !py-1.5 !text-[11px] text-ink-500 hover:bg-rose-500/[0.12] hover:text-rose-300"
+              :disabled="backupBusy"
+              title="删除这份备份"
+              @click="removeBackup(item.file)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
+          </div>
+          <div v-if="!backups.length" class="px-1 py-6 text-center text-xs text-ink-400">
+            还没有备份。有存档时点下面的按钮留一份。
+          </div>
+        </div>
+
+        <button class="btn-primary mt-4 w-full justify-center !py-2.5 !text-xs" :disabled="backupBusy" @click="createBackup">
+          <Icon :name="backupBusy ? 'refresh' : 'package'" :size="14" :class="backupBusy ? 'animate-spin' : ''" />
+          {{ backupBusy ? "处理中…" : "立即备份" }}
+        </button>
+        <p class="mt-2 text-center text-[10px] text-ink-400">
+          自动保留最近 10 份；删除版本前也会自动备一份。
+        </p>
+      </div>
+    </div>
 
     <!-- 导出面板：只对当前点开的那个版本生效 -->
     <div

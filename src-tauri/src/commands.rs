@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager, State};
 use std::os::windows::process::CommandExt as _;
 
 use crate::engine::auth;
+use crate::engine::backup;
 use crate::engine::queue::QueueItem;
 use crate::engine::{
     browse, export, imports, install, java, jdk, launch, loader, memory, modpack, mods, skin,
@@ -77,6 +78,28 @@ pub fn delete_version(
     id: String,
 ) -> Result<install::DeleteReport> {
     install::delete(&state, &id)
+}
+
+/// 复制版本：整份版本目录（mods/配置/存档）拷成新 id。
+#[tauri::command(async)]
+pub fn copy_version(state: State<'_, AppState>, id: String, new_id: String) -> Result<String> {
+    install::copy(&state, &id, &new_id)
+}
+
+/// 重命名版本：目录、json、jar 一起改名。
+#[tauri::command(async)]
+pub fn rename_version(state: State<'_, AppState>, id: String, new_id: String) -> Result<String> {
+    install::rename(&state, &id, &new_id)
+}
+
+/// 修复版本文件：重跑安装计划。健康的文件（大小 + 哈希对得上）会被下载器
+/// 直接跳过，只补缺失/损坏的；`game/` 里的 mods、存档、配置完全不碰。
+#[tauri::command]
+pub async fn repair_version(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<install::InstallReport> {
+    install::install(&state, &id).await
 }
 
 /// 安装版本。下载进度通过 `queue://progress` 事件推送。
@@ -552,7 +575,7 @@ pub async fn skin_avatar(
     name: Option<String>,
     uuid: Option<String>,
 ) -> Result<skin::Avatar> {
-    let account = auth::Account::load(&state.paths);
+    let account = auth::AccountStore::load(&state.paths).active_account();
     if account.active() {
         // 皮肤站的档案查询端点是 <yggdrasil根>/sessionserver/session/minecraft/profile，
         // 不是 API 根本身（authlib-injector 的部署约定）；微软正版走官方端点
@@ -762,8 +785,28 @@ fn channel_of(name: &str) -> Option<Channel> {
 
 /// 当前账户（脱敏）。前端据此渲染「离线 / 皮肤站」两张卡。
 #[tauri::command(async)]
-pub fn auth_status(state: State<'_, AppState>) -> auth::AccountView {
-    auth::Account::load(&state.paths).view()
+pub fn auth_status(state: State<'_, AppState>) -> auth::AuthStatusView {
+    auth::AccountStore::load(&state.paths).view()
+}
+
+/// 切换活跃账户。`index = null` 切回离线模式（离线不占列表位）。
+#[tauri::command(async)]
+pub fn auth_set_active(
+    state: State<'_, AppState>,
+    index: Option<usize>,
+) -> Result<auth::AuthStatusView> {
+    let mut store = auth::AccountStore::load(&state.paths);
+    match index {
+        None => store.active = None,
+        Some(i) => {
+            if i >= store.accounts.len() {
+                return Err(crate::error::Error::msg("没有这个账户，列表可能已变化"));
+            }
+            store.active = Some(i);
+        }
+    }
+    store.save(&state.paths)?;
+    Ok(store.view())
 }
 
 /// 验证皮肤站地址可用，回元数据（名字等）。自定义地址的「测试连接」用。
@@ -801,6 +844,115 @@ pub async fn auth_select_profile(
 #[tauri::command]
 pub async fn auth_logout(state: State<'_, AppState>) -> Result<()> {
     auth::logout(&state).await
+}
+
+// ---------------------------------------------------------------------------
+// 存档备份
+// ---------------------------------------------------------------------------
+
+/// 列出某版本的存档备份（新的在前）。
+#[tauri::command(async)]
+pub fn backup_list(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<Vec<backup::BackupInfo>> {
+    backup::list(&state.paths, &version_id)
+}
+
+/// 立即备份一份。`None` = 这个版本还没有存档。
+#[tauri::command(async)]
+pub fn backup_create(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<Option<backup::BackupInfo>> {
+    backup::create(&state.paths, &version_id)
+}
+
+/// 还原一份备份（还原前会自动快照当前存档）。
+#[tauri::command(async)]
+pub fn backup_restore(
+    state: State<'_, AppState>,
+    version_id: String,
+    file: String,
+) -> Result<()> {
+    backup::restore(&state.paths, &version_id, &file)
+}
+
+/// 删除一份备份文件。
+#[tauri::command(async)]
+pub fn backup_remove(state: State<'_, AppState>, version_id: String, file: String) -> Result<()> {
+    backup::remove(&state.paths, &version_id, &file)
+}
+
+// ---------------------------------------------------------------------------
+// Mod 诊断
+// ---------------------------------------------------------------------------
+
+/// 扫一遍已启用的 mod，报告缺前置 / 版本不匹配 / 冲突（不联网，读 jar 元数据）。
+#[tauri::command]
+pub async fn mod_diagnostics(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<Vec<crate::engine::moddiag::ModIssue>> {
+    let version_id = version_id.trim().to_string();
+    if version_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (version, chain) =
+        crate::engine::meta::load_merged_with_chain(&state.paths.versions(), &version_id)?;
+    // 游戏版本 = 继承链最底层的原版 id（fabric-loader-x-1.21.4 → 1.21.4）
+    let game_version = chain.last().cloned().unwrap_or_else(|| version.id.clone());
+    let (loader, loader_version) = detect_loader(&version);
+    let ctx = crate::engine::moddiag::DiagnosticContext {
+        game_version,
+        loader,
+        loader_version,
+    };
+
+    let mods_dir = state.paths.mods(&version_id);
+    let enabled: Vec<String> = crate::engine::mods::list(&mods_dir)
+        .into_iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.file_name)
+        .collect();
+    if enabled.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 几百个 jar 的 zip 头读取是同步 IO，丢 blocking 池
+    tokio::task::spawn_blocking(move || {
+        crate::engine::moddiag::diagnose(&mods_dir, &ctx, &enabled)
+    })
+    .await
+    .map_err(|e| crate::error::Error::msg(format!("诊断任务异常：{e}")))
+}
+
+/// 从合并后的 libraries 里认出加载器和它的版本。
+fn detect_loader(version: &crate::engine::meta::VersionJson) -> (String, String) {
+    for library in &version.libraries {
+        let name = library.name.to_lowercase();
+        let version_part = library
+            .name
+            .split(':')
+            .nth(2)
+            .unwrap_or("")
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if name.starts_with("net.fabricmc:fabric-loader") {
+            return ("fabric".into(), library.name.split(':').nth(2).unwrap_or("").to_string());
+        }
+        if name.starts_with("org.quiltmc:quilt-loader") {
+            return ("quilt".into(), library.name.split(':').nth(2).unwrap_or("").to_string());
+        }
+        if name.starts_with("net.minecraftforge:forge") || name.starts_with("net.minecraftforge:fml") {
+            return ("forge".into(), version_part);
+        }
+        if name.contains("neoforged") && (name.contains("loader") || name.contains("neoforge")) {
+            return ("neoforge".into(), version_part);
+        }
+    }
+    (String::new(), String::new())
 }
 
 // ---------------------------------------------------------------------------

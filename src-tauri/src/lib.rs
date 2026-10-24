@@ -101,6 +101,7 @@ pub fn run() {
             commands::netplay_frp_save_token,
             commands::netplay_frp_start,
             commands::auth_status,
+            commands::auth_set_active,
             commands::auth_server_info,
             commands::auth_login,
             commands::auth_select_profile,
@@ -108,6 +109,14 @@ pub fn run() {
             commands::auth_ms_begin,
             commands::auth_ms_poll,
             commands::open_in_browser,
+            commands::backup_list,
+            commands::backup_create,
+            commands::backup_restore,
+            commands::backup_remove,
+            commands::mod_diagnostics,
+            commands::copy_version,
+            commands::rename_version,
+            commands::repair_version,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");
