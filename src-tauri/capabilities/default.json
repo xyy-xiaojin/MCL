@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "默认能力：核心 IPC + 文件选择框（「添加 mod」按钮）。不开放其他插件权限。",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}

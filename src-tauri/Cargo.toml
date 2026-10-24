@@ -1,0 +1,66 @@
+[package]
+name = "mcl-tauri"
+version = "0.0.3"
+description = "MCL · Tauri 2 + Vue 3 的 Minecraft 启动器（0.01）"
+edition = "2021"
+rust-version = "1.77"
+
+# Tauri v2 的标准布局：lib 里放业务与 Builder，main 只负责调用。
+# 这样以后要支持移动端也不用改代码结构。
+[lib]
+name = "mcl_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# 打包开关：启用后 tauri 不再连 devUrl，而是把 ../dist 里的前端资源嵌进 exe。
+# 平时 `cargo build` 不带它（走 vite dev server）；要产出能双击运行的版本就带上：
+#   cargo build --features custom-protocol -j 1
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# 系统文件选择框：「添加 mod」按钮用（之前导入只能靠拖拽）
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+futures-util = "0.3"
+sha1 = "0.10"
+# authlib-injector jar 的完整性校验（官方元数据给的是 sha256）
+sha2 = "0.10"
+# 离线账号 UUID：MC 生态用的是 MD5("OfflinePlayer:<name>")，和登录插件/皮肤站对得上
+md5 = "0.7"
+thiserror = "2"
+regex = "1"
+dirs = "5"
+# 只启用 deflate：MC 的 jar / 整合包全是 deflate，
+# 默认特性会拖进 bzip2/zstd 这些需要 C 工具链的东西。
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+# 端口映射：UPnP 找路由器、加映射。只启用 tokio 异步版，
+# 默认特性会拖进 attohttpc（同步 HTTP 客户端），这里用不上。
+igd-next = { version = "0.17.1", default-features = false, features = ["aio_tokio"] }
+
+# 磁盘剩余空间预检：unix 走 statvfs（已在依赖树里），windows 走 GetDiskFreeSpaceExW。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+# TLS 必须用 rustls：默认的 native-tls 在 Linux 上依赖系统 OpenSSL。
+[dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json", "stream", "rustls-tls"]
+
+[profile.dev]
+# 本机 Smart App Control 会稳定拦截 release 版里某些 proc-macro DLL（darling_macro、
+# serde_derive），release 构建根本出不来。折中：debug 里开一级优化，让下载/哈希/解压
+# 这些热路径跑得快一些，代价是自己这个 crate 编译慢几秒。
+# 注意：这批 dev DLL 的哈希已经通过了 SAC 的云端判定，是本机唯一能编的配置——
+# 改 opt-level 会换一批新哈希，大概率又被拦（实测 2026-10-24，opt-level=3 拦 20/20）。
+# 注意别写成 [profile.dev.package."*"]，那会让 winreg 编译崩溃。
+opt-level = 1

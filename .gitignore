@@ -1,0 +1,19 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+release/
+@AutomationLog.txt
+
+# 联机组件是第三方成品二进制（EasyTier/frpc/wintun 等，约 48MB），不进 Git。
+# 获取方式见 src-tauri/resources/netplay/README.md。
+src-tauri/resources/netplay/*.exe
+src-tauri/resources/netplay/*.dll
+src-tauri/resources/netplay/*.sys
+
+# 根目录的运行副本：由 src-tauri 的构建产物与联机组件复制而来（锚定根目录）。
+/MCL.exe
+/resources/
+/MCL

@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* select / 滚动条等原生控件跟着走深色 */
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* 跨平台字体栈：Windows 走 Segoe/微软雅黑，macOS 走苹方，
+     Linux 走 Noto/思源黑体（没装的话退到发行版默认字体）。
+     中文字体必须显式列出来，否则 Linux 上会落到 DejaVu 导致中文发虚。 */
+  font-family: "Inter", "Segoe UI", "Microsoft YaHei UI", "PingFang SC",
+    "Noto Sans CJK SC", "Source Han Sans SC", "Noto Sans SC", -apple-system,
+    "Ubuntu", "Cantarell", "Noto Sans", system-ui, sans-serif;
+  /* 冷黑底 + 左上紫色光晕 + 右上青色微光，给"科技感"打底 */
+  background:
+    radial-gradient(1100px 560px at 12% -12%, rgba(124, 58, 237, 0.22), transparent 62%),
+    radial-gradient(900px 480px at 96% -6%, rgba(56, 189, 248, 0.1), transparent 58%),
+    #0a0910;
+  background-attachment: fixed;
+  color: #f4f1ff;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* 细滚动条：默认的粗灰条会破坏卡片质感 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(167, 139, 250, 0.22);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(167, 139, 250, 0.42);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 输入框的占位与选中在深色下要单独调 */
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+}
+input,
+select,
+textarea {
+  color-scheme: dark;
+}
+select option {
+  background: #131120;
+  color: #f4f1ff;
+}
+
+/* 原生 range 在深色下默认是白色轨道，必须自己画 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #a78bfa, #7c3aed);
+  box-shadow:
+    0 0 0 4px rgba(139, 92, 246, 0.16),
+    0 0 18px rgba(139, 92, 246, 0.55);
+  transition: transform 0.15s ease;
+}
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+
+@layer components {
+  /* 卡片：深色面板 + 极细描边 + 顶部一道高光，hover 时抬一点并透出紫边 */
+  .card {
+    @apply rounded-card border border-line bg-surface shadow-card;
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 52%);
+  }
+  .card-hover {
+    @apply transition-all duration-300 ease-smooth hover:-translate-y-0.5 hover:shadow-card-hover;
+  }
+  /* 玻璃面板：顶栏、侧栏、抽屉用 */
+  .glass {
+    @apply border border-line bg-surface/70 backdrop-blur-xl;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 ease-smooth disabled:cursor-not-allowed disabled:opacity-45;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white shadow-[0_10px_28px_-12px_rgba(124,58,237,0.9)] hover:bg-brand-500 active:scale-[0.985] disabled:shadow-none;
+  }
+  .btn-ghost {
+    @apply btn bg-white/[0.06] text-ink-700 hover:bg-white/[0.1] hover:text-ink-900;
+  }
+  .btn-outline {
+    @apply btn border border-brand-500/35 bg-brand-500/[0.08] text-brand-200 hover:border-brand-400/60 hover:bg-brand-500/[0.16] hover:text-white;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-white/[0.09] bg-white/[0.035] px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-all duration-200 placeholder:text-ink-400 focus:border-brand-400/70 focus:bg-white/[0.06] focus:ring-4 focus:ring-brand-500/15;
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-semibold tracking-wide text-ink-400;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-pill px-2.5 py-1 text-[11px] font-semibold;
+  }
+  /* 状态色在深色下的统一写法：半透明底 + 亮文字 */
+  .chip-brand {
+    @apply chip bg-brand-500/[0.16] text-brand-200;
+  }
+  .chip-ok {
+    @apply chip bg-emerald-500/[0.14] text-emerald-300;
+  }
+  .chip-warn {
+    @apply chip bg-amber-500/[0.14] text-amber-300;
+  }
+  .chip-bad {
+    @apply chip bg-rose-500/[0.14] text-rose-300;
+  }
+  .chip-mute {
+    @apply chip bg-white/[0.06] text-ink-500;
+  }
+  /* 骨架屏 */
+  .skeleton {
+    @apply rounded-lg bg-white/[0.06] animate-pulse-soft;
+  }
+}
+
+/* 页面切换的入场动画：只动 transform/opacity，不触发重排 */
+.view-enter {
+  animation: fade-up 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

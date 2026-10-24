@@ -1,0 +1,65 @@
+# Windows 版自动编译：push 到 main（或手动触发）时，在 GitHub 的 Windows
+# 云机器上出 release exe 并打包成免安装 zip。
+#
+# 为什么走 CI：开发机的 Smart App Control 会随机拦截新编译的 build script
+# （os error 4551），本机 release 要靠 build_retry.sh 反复重试；CI 的机器
+# 没有 SAC，直接 cargo build 一次过。
+#
+# 产物在 Actions 页面对应 run 的 Artifacts 里下载（MCL-<版本>-win64.zip），
+# 解压后整个文件夹发给别人即可——联机组件在 resources/netplay/ 下，不能单拷 exe。
+#
+# 仓库是私有的也没关系：私有仓库的 Actions 每月有 2000 分钟免费额度，
+# Windows runner 按 2 倍计费，一次编译约 15 分钟（计 30 分钟），够用。
+
+name: build-windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 类库缓存：首次编译 ~15 分钟，命中缓存后 ~5 分钟
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build frontend
+        run: npm ci && npm run build
+
+      - name: Build Windows exe (embed frontend)
+        run: cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
+
+      - name: Package portable zip
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          DIR="MCL-${VERSION}-win64"
+          mkdir -p "$DIR"
+          cp src-tauri/target/release/mcl-tauri.exe "$DIR/MCL.exe"
+          cp -r src-tauri/resources "$DIR/resources"
+          # 构建信息写进包里，排查问题时一眼看清是哪次提交编的
+          git log -1 --format="commit %H%n%ci%n%s" > "$DIR/BUILD-INFO.txt"
+          7z a "MCL-${VERSION}-win64.zip" "$DIR"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCL-win64
+          path: MCL-*-win64.zip
+          retention-days: 30
