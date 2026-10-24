@@ -233,7 +233,14 @@ pub fn launch(
         } else {
             "0".to_string()
         },
-        user_type: if real_account { "mojang" } else { "legacy" }.to_string(),
+        // 官方约定：微软账户 msa、皮肤站（yggdrasil）mojang、离线 legacy。
+        // 个别服务端插件按 user_type 分流，填错会被当成盗版账号。
+        user_type: match account.kind.as_str() {
+            auth::KIND_MICROSOFT => "msa",
+            auth::KIND_AUTHLIB => "mojang",
+            _ => "legacy",
+        }
+        .to_string(),
         version_id: version.id.clone(),
         version_type: version
             .version_type

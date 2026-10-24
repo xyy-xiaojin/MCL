@@ -109,17 +109,27 @@ const requiredJavaMajor = (version: string) => {
   return 8;
 };
 
+/**
+ * 加载器版本列表的请求代际号：快速切换加载器/游戏版本时，
+ * 慢的旧响应不能覆盖新响应（否则下拉里显示的是别的组合的版本）。
+ */
+let loaderVersionsSeq = 0;
+
 async function loadInstallerLoaderVersions() {
+  const seq = ++loaderVersionsSeq;
   loaderVersions.value = [];
   if (installerLoader.value === "vanilla") return;
   loadingLoaderVersions.value = true;
   try {
-    loaderVersions.value = await api.listLoaderVersions(installerLoader.value, installerVersion.value);
+    const list = await api.listLoaderVersions(installerLoader.value, installerVersion.value);
+    if (seq !== loaderVersionsSeq) return;
+    loaderVersions.value = list;
   } catch (e) {
+    if (seq !== loaderVersionsSeq) return;
     // 版本清单暂时不可用时仍允许使用后端的稳定版自动选择。
     notify(`暂时无法获取加载器版本列表：${errorText(e)}`, "error");
   } finally {
-    loadingLoaderVersions.value = false;
+    if (seq === loaderVersionsSeq) loadingLoaderVersions.value = false;
   }
 }
 
@@ -151,9 +161,18 @@ async function installConfiguredGame() {
 
     if (installerLoader.value !== "vanilla") {
       await refreshLocal();
-      const existingLoaderVersion = state.local.find((v) =>
-        v.complete && v.id.startsWith(`${installerLoader.value}-loader-`) && v.id.endsWith(`-${gameVersion}`),
-      );
+      // 「已装过就复用」只对 Fabric / Quilt 生效：它们的版本 ID 是我们自己
+      // 拼的 `<loader>-loader-<v>-<game>`，格式确定。Forge / NeoForge 的目录
+      // 名是官方安装器产的（`1.20.1-forge-47.2.0`），前缀对不上，强行匹配
+      // 只会漏判然后每次重跑安装器——宁可让后端自己判重。
+      const existingLoaderVersion =
+        installerLoader.value === "fabric" || installerLoader.value === "quilt"
+          ? state.local.find((v) =>
+              v.complete &&
+              v.id.startsWith(`${installerLoader.value}-loader-`) &&
+              v.id.endsWith(`-${gameVersion}`),
+            )
+          : undefined;
       if (existingLoaderVersion) {
         await refreshRemote();
         state.selectedVersion = existingLoaderVersion.id;

@@ -503,6 +503,17 @@ fn extract_natives(natives: &[NativeJar], out_dir: &Path) -> Result<()> {
         .parent()
         .ok_or_else(|| Error::msg("natives 目录没有父目录"))?;
     std::fs::create_dir_all(parent)?;
+    // 上次失败/中途杀进程留下的旧暂存目录先清掉：目录名带时间戳，
+    // 每次都是新名字，不清就会一直堆在版本目录下（每个几 MB）
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".natives-stage-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
     let staged = parent.join(format!(
         ".natives-stage-{}-{}",
         std::process::id(),
@@ -514,6 +525,22 @@ fn extract_natives(natives: &[NativeJar], out_dir: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&staged);
     std::fs::create_dir_all(&staged)?;
 
+    let result = extract_natives_into(natives, &staged);
+    if let Err(err) = result {
+        // 解压失败不留暂存目录：留着只会越积越多，正式目录也没被碰过
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(err);
+    }
+
+    if out_dir.exists() {
+        std::fs::remove_dir_all(out_dir)?;
+    }
+    std::fs::rename(&staged, out_dir)?;
+    Ok(())
+}
+
+/// 把所有 native jar 解进暂存目录（extract_natives 的主体，失败时由调用方清理）。
+fn extract_natives_into(natives: &[NativeJar], staged: &Path) -> Result<()> {
     for native in natives {
         if !native.jar.is_file() {
             return Err(Error::msg(format!(
@@ -545,11 +572,6 @@ fn extract_natives(natives: &[NativeJar], out_dir: &Path) -> Result<()> {
             std::io::copy(&mut entry, &mut out)?;
         }
     }
-
-    if out_dir.exists() {
-        std::fs::remove_dir_all(out_dir)?;
-    }
-    std::fs::rename(&staged, out_dir)?;
     Ok(())
 }
 

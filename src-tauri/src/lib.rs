@@ -41,6 +41,7 @@ pub fn run() {
                 netplay: Default::default(),
                 running_games: Default::default(),
                 app: app.handle().clone(),
+                account_lock: Default::default(),
             });
             Ok(())
         })

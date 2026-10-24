@@ -164,15 +164,25 @@ pub async fn install(state: &AppState, major: i64) -> Result<java::JavaInfo> {
         )));
     }
 
-    // 解压前清掉半截目录：上次解压失败可能留了一堆文件
+    // 解压前清掉半截目录：上次解压失败可能留了一堆文件。
+    // 删整棵 JRE 树是几千个文件的同步 IO，和哈希/解压一样进 blocking 池，
+    // 直接跑在 async worker 上会把并发命令全部卡住。
     let jre_root = state.paths.jre_dir().join(major.to_string());
-    let _ = std::fs::remove_dir_all(&jre_root);
-    std::fs::create_dir_all(&jre_root)?;
-    let used_mirror = state.source() != "official";
     let archive_path = archive.clone();
     let target = jre_root.clone();
     let is_zip = cfg!(windows) || package.name.to_ascii_lowercase().ends_with(".zip");
     tokio::task::spawn_blocking(move || -> Result<()> {
+        std::fs::remove_dir_all(&target)
+            .or_else(|e| {
+                // 目录本来不存在是正常情况；其他错误（文件被占用）会让
+                // 后面的 create_dir_all/extraction 失败，到那时再报
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+        std::fs::create_dir_all(&target)?;
         if is_zip {
             extract_zip(&archive_path, &target)
         } else {
@@ -189,7 +199,9 @@ pub async fn install(state: &AppState, major: i64) -> Result<java::JavaInfo> {
     let info = java::JavaInfo {
         path: exe.to_string_lossy().to_string(),
         major: java::major_version(&exe).unwrap_or(major),
-        source: format!("MCL 下载（{}）", if used_mirror { "镜像" } else { "官方" }),
+        // 下载主地址恒为 TUNA 镜像、404 时队列自动落官方，事后无从得知
+        // 实际用了哪个，别标一个可能错误的"镜像/官方"
+        source: "MCL 下载（Temurin）".to_string(),
     };
     if info.major > 0 && info.major != major {
         return Err(Error::msg(format!(

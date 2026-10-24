@@ -225,8 +225,14 @@ pub async fn install(
 
     // 3) Java：installer 自己也是 Java 程序。检测到的 Java 够新就直接用，
     //    否则触发自动下载——朋友的裸机走到这里也不会卡死。
+    //    java -version 是同步起子进程（130~170ms，杀软下更久），
+    //    包进 blocking 池，别占着 async worker。
     let needed = base_java_major(state, game_version).unwrap_or(8);
-    let info = match state.java_info(false) {
+    let java_path = state.settings().java_path.trim().to_string();
+    let detected = tokio::task::spawn_blocking(move || crate::engine::java::detect(&java_path))
+        .await
+        .map_err(|e| Error::msg(format!("Java 探测任务异常：{e}")))?;
+    let info = match detected {
         Some(found) if found.major >= needed => found,
         _ => jdk::install(state, needed).await?,
     };
@@ -267,11 +273,18 @@ pub async fn install(
     // 这是实测踩到的坑；HMCL / PCL 也是这么补桩的。已有文件绝不覆盖。
     write_profiles_stub(&root, game_version)?;
     let before = version_dirs(&root);
+    // 官方产出的 id 是 `{游戏版本}-forge-{forge版本}`（实测 1.20.1 装
+    // 47.4.28 得到 `1.20.1-forge-47.4.28`），NeoForge 同理用 neoforge。
+    // 前后 diff 和失败清理都只认这个前缀：installer 要跑几分钟，
+    // 期间并发装的其他版本也会出现在 diff 里，不能误认/误删。
+    let kind = if is_neoforge { "neoforge" } else { "forge" };
+    let prefix = format!("{game_version}-{kind}-");
     let installer_for_run = installer_path.clone();
     let root_for_run = root.clone();
     let app_for_run = state.app.clone();
+    let loader_name = loader.as_str();
     let run = tokio::task::spawn_blocking(move || {
-        run_installer(&app_for_run, std::path::Path::new(&info.path), &installer_for_run, &root_for_run)
+        run_installer(&app_for_run, std::path::Path::new(&info.path), &installer_for_run, &root_for_run, loader_name)
     })
     .await
     .map_err(|e| Error::msg(format!("安装器任务异常：{e}")));
@@ -282,21 +295,27 @@ pub async fn install(
     );
     if let Err(err) = run {
         let _ = std::fs::remove_file(&installer_path);
+        // 失败清理：installer 失败前可能已经写下半成品版本目录（json 在、
+        // 补丁 jar 不在）。留着的话版本页会把它标成"完整"，点启动就翻车，
+        // 重装还会被"已存在"分支误判。只删本游戏版本前缀的新目录，
+        // 并发装的其他版本不碰。
+        for id in version_dirs(&root) {
+            if !before.contains(&id) && id.starts_with(&prefix) {
+                let _ = std::fs::remove_dir_all(state.paths.version_dir(&id));
+            }
+        }
         return Err(err);
     }
 
     let created = version_dirs(&root)
         .into_iter()
-        .filter(|id| !before.contains(id))
+        .filter(|id| !before.contains(id) && id.starts_with(&prefix))
         .find(|id| state.paths.version_dir(id).join(format!("{id}.json")).is_file());
     let created = match created {
         Some(id) => id,
         None => {
             // 安装器正常退出但没建新目录：多半是重复安装。
-            // 官方产出的 id 是 `{游戏版本}-forge-{forge版本}`（实测 1.20.1 装
-            // 47.4.28 得到 `1.20.1-forge-47.4.28`），NeoForge 同理用 neoforge。
-            let kind = if is_neoforge { "neoforge" } else { "forge" };
-            let predicted = format!("{game_version}-{kind}-{loader_version}");
+            let predicted = format!("{prefix}{loader_version}");
             if state
                 .paths
                 .version_dir(&predicted)
@@ -422,12 +441,21 @@ const LOG_FLUSH_MS: u64 = 120;
 /// 处理器管线要跑几分钟，之前是等 `output()` 全部结束才返回——界面上
 /// 只有按钮转圈，朋友会以为卡死了。现在安装的每一行都实时可见，
 /// 失败时错误信息带上最后几行，有得查。
-fn run_installer(app: &tauri::AppHandle, java: &Path, installer: &Path, root: &Path) -> Result<()> {
+fn run_installer(
+    app: &tauri::AppHandle,
+    java: &Path,
+    installer: &Path,
+    root: &Path,
+    loader_name: &str,
+) -> Result<()> {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use std::sync::atomic::Ordering;
 
-    let loader_tag = "forge".to_string();
+    // 日志事件的 loader 标签必须和 installer://done 的一致：
+    // 前端按 loader 匹配配对开始/结束，NeoForge 被标成 forge 的话
+    // "正在安装"面板永远等不到自己的结束事件
+    let loader_tag = loader_name.to_string();
     let mut command = std::process::Command::new(java);
     command
         .args([
@@ -490,6 +518,8 @@ fn run_installer(app: &tauri::AppHandle, java: &Path, installer: &Path, root: &P
     let flush = {
         let pending = Arc::clone(&pending);
         let remaining = Arc::clone(&remaining);
+        // loader_tag 后面的错误文案还要用，这里只给它一份克隆
+        let loader_tag = loader_tag.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(LOG_FLUSH_MS));
             let batch: Vec<String> = pending
@@ -519,7 +549,8 @@ fn run_installer(app: &tauri::AppHandle, java: &Path, installer: &Path, root: &P
         Ok(status) => {
             let tail_text = tail.lock().map(|t| t.join("\n")).unwrap_or_default();
             Err(Error::msg(format!(
-                "Forge 安装器运行失败（退出码 {}）：\n{}",
+                "{} 安装器运行失败（退出码 {}）：\n{}",
+                loader_tag,
                 status.code().unwrap_or(-1),
                 if tail_text.is_empty() {
                     "（安装器没有输出）".to_string()

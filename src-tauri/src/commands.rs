@@ -554,9 +554,13 @@ pub async fn skin_avatar(
 ) -> Result<skin::Avatar> {
     let account = auth::Account::load(&state.paths);
     if account.active() {
-        // 皮肤站走它自己的 sessionserver；微软正版走官方端点（server_url 为空）
+        // 皮肤站的档案查询端点是 <yggdrasil根>/sessionserver/session/minecraft/profile，
+        // 不是 API 根本身（authlib-injector 的部署约定）；微软正版走官方端点
         let session_api = if account.kind == auth::KIND_AUTHLIB {
-            Some(account.server_url.as_str())
+            Some(format!(
+                "{}/sessionserver/session/minecraft/profile",
+                account.server_url.trim_end_matches('/')
+            ))
         } else {
             None
         };
@@ -564,7 +568,7 @@ pub async fn skin_avatar(
             &state,
             &account.profile_name,
             Some(&account.profile_id),
-            session_api,
+            session_api.as_deref(),
         )
         .await);
     }
@@ -780,23 +784,23 @@ pub async fn auth_login(
     email: String,
     password: String,
 ) -> Result<auth::LoginOutcome> {
-    auth::login(&state.client, &state.paths, &server_url, &email, &password).await
+    auth::login(&state, &server_url, &email, &password).await
 }
 
 /// 多角色登录的收尾：把选中的角色补进已保存的会话。
-#[tauri::command(async)]
-pub fn auth_select_profile(
+#[tauri::command]
+pub async fn auth_select_profile(
     state: State<'_, AppState>,
     profile_id: String,
     profile_name: String,
 ) -> Result<auth::AccountView> {
-    auth::select_profile(&state.paths, &profile_id, &profile_name)
+    auth::select_profile(&state, &profile_id, &profile_name).await
 }
 
 /// 登出：作废 token（尽力而为）并回到离线模式。
 #[tauri::command]
 pub async fn auth_logout(state: State<'_, AppState>) -> Result<()> {
-    auth::logout(&state.client, &state.paths).await
+    auth::logout(&state).await
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +819,7 @@ pub async fn auth_ms_poll(
     state: State<'_, AppState>,
     device_code: String,
 ) -> Result<auth::MsPoll> {
-    auth::ms_poll(&state.client, &state.paths, &device_code).await
+    auth::ms_poll(&state, &device_code).await
 }
 
 /// 用系统默认浏览器打开一个网址（设备码登录的验证页）。

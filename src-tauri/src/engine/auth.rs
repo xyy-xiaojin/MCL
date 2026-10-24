@@ -243,6 +243,8 @@ struct AuthPayload<'a> {
 #[derive(Serialize)]
 struct Agent {
     name: &'static str,
+    /// yggdrasil 规范要求 agent 带 version，固定 1
+    version: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +267,14 @@ struct ApiError {
 /// 自己写的（LittleSkin 是中文），优先用它。
 async fn api_error(response: reqwest::Response) -> Error {
     let status = response.status();
+    // yggdrasil 规范：错误信息也会通过这个响应头传递——错误体不是 JSON
+    // （反代 502 的 HTML、限流页）时，它是唯一的信息来源
+    let header_message = response
+        .headers()
+        .get("X-Auth-ErrorMessage")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let text = response.text().await.unwrap_or_default();
     let server_message = serde_json::from_str::<ApiError>(&text)
         .ok()
@@ -276,20 +286,23 @@ async fn api_error(response: reqwest::Response) -> Error {
         429 => "尝试次数太多，等几分钟再试",
         _ => "皮肤站请求失败",
     };
-    match server_message {
+    match server_message.or(header_message) {
         Some(message) => Error::msg(format!("{message}（HTTP {status}）")),
         None => Error::msg(format!("{fallback}（HTTP {status}）")),
     }
 }
 
 /// 登录。成功就把账户写进 account.json（密码只活在这一屏）。
+/// 全程持账户锁：登录的「读 → 网络 → 写」期间不许有别的写者。
 pub async fn login(
-    client: &reqwest::Client,
-    paths: &Paths,
+    state: &AppState,
     server_url: &str,
     email: &str,
     password: &str,
 ) -> Result<LoginOutcome> {
+    let _guard = state.account_lock.lock().await;
+    let client = &state.client;
+    let paths = &state.paths;
     let email = email.trim();
     if email.is_empty() || password.is_empty() {
         return Err(Error::msg("请填写皮肤站的邮箱和密码"));
@@ -300,7 +313,10 @@ pub async fn login(
         .post(format!("{}/authserver/authenticate", info.url))
         .timeout(Duration::from_secs(15))
         .json(&AuthPayload {
-            agent: Agent { name: "Minecraft" },
+            agent: Agent {
+                name: "Minecraft",
+                version: 1,
+            },
             username: email,
             password,
         })
@@ -368,8 +384,13 @@ pub async fn login(
 }
 
 /// 多角色登录后的第二步：把选中的角色补进已保存的 token 会话里。
-pub fn select_profile(paths: &Paths, profile_id: &str, profile_name: &str) -> Result<AccountView> {
-    let mut account = Account::load(paths);
+pub async fn select_profile(
+    state: &AppState,
+    profile_id: &str,
+    profile_name: &str,
+) -> Result<AccountView> {
+    let _guard = state.account_lock.lock().await;
+    let mut account = Account::load(&state.paths);
     if account.kind != KIND_AUTHLIB || account.access_token.is_empty() {
         return Err(Error::msg("还没有登录皮肤站"));
     }
@@ -381,15 +402,17 @@ pub fn select_profile(paths: &Paths, profile_id: &str, profile_name: &str) -> Re
     if account.profile_name.is_empty() {
         return Err(Error::msg("角色名不能为空"));
     }
-    account.save(paths)?;
+    account.save(&state.paths)?;
     Ok(account.view())
 }
 
 /// 登出：尽力通知皮肤站作废 token（失败不拦——本地清了才算数）。
-pub async fn logout(client: &reqwest::Client, paths: &Paths) -> Result<()> {
-    let account = Account::load(paths);
+pub async fn logout(state: &AppState) -> Result<()> {
+    let _guard = state.account_lock.lock().await;
+    let account = Account::load(&state.paths);
     if account.kind == KIND_AUTHLIB && !account.access_token.is_empty() {
-        let _ = client
+        let _ = state
+            .client
             .post(format!(
                 "{}/authserver/invalidate",
                 account.server_url
@@ -399,13 +422,16 @@ pub async fn logout(client: &reqwest::Client, paths: &Paths) -> Result<()> {
             .send()
             .await;
     }
-    Account::clear(paths);
+    Account::clear(&state.paths);
     Ok(())
 }
 
 /// 启动前确认 token 还能用，不能就续。离线账户原样返回。
+/// 持账户锁跑完整个「读 → validate/refresh → 写回」事务。
 pub async fn ensure_token(state: &AppState) -> Result<Account> {
+    let _guard = state.account_lock.lock().await;
     let account = Account::load(&state.paths);
+    // ensure_microsoft 也在锁内跑（本函数已持锁，不能重入）
     if account.kind == KIND_MICROSOFT {
         return ensure_microsoft(state, account).await;
     }
@@ -470,6 +496,10 @@ pub async fn ensure_token(state: &AppState) -> Result<Account> {
 
 #[derive(Debug, Deserialize)]
 struct InjectorArtifact {
+    /// 真实接口（实测 2026-10）返回的是单数 `download_url`；
+    /// 旧版接口曾是 `urls` 数组，两个都认
+    #[serde(default)]
+    download_url: String,
     #[serde(default)]
     version: String,
     #[serde(default)]
@@ -539,10 +569,14 @@ pub async fn ensure_jar(state: &AppState) -> Result<PathBuf> {
         .await
         .map_err(|_| Error::msg("authlib-injector 的版本信息看不懂"))?;
 
-    let url = meta
-        .urls
-        .first()
-        .ok_or_else(|| Error::msg("authlib-injector 的元数据里没有下载地址"))?;
+    let url = if !meta.download_url.is_empty() {
+        meta.download_url.clone()
+    } else {
+        meta.urls
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::msg("authlib-injector 的元数据里没有下载地址"))?
+    };
     let expected_sha = meta
         .checksums
         .map(|c| c.sha256)
@@ -656,11 +690,12 @@ pub struct DeviceCodeStart {
     pub expires_in: u64,
 }
 
-/// 轮询结果：还没授权（继续轮）或已完成（账户就绪）。
+/// 轮询结果：还没授权（继续轮）、被要求放慢（间隔 +5s 再轮）、已完成（账户就绪）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum MsPoll {
     Pending,
+    SlowDown,
     Done { account: AccountView },
 }
 
@@ -715,15 +750,12 @@ fn parse_device_code(body: &serde_json::Value) -> Result<DeviceCodeStart> {
 }
 
 /// 轮询一次设备码。授权中返回 `Pending`，完成则走完整条换票链并保存账户。
-pub async fn ms_poll(
-    client: &reqwest::Client,
-    paths: &Paths,
-    device_code: &str,
-) -> Result<MsPoll> {
+pub async fn ms_poll(state: &AppState, device_code: &str) -> Result<MsPoll> {
     if MS_CLIENT_ID.trim().is_empty() {
         return Err(Error::msg("还没有配置微软登录的 client_id"));
     }
-    let response = client
+    let response = state
+        .client
         .post(MS_TOKEN_API)
         .timeout(Duration::from_secs(15))
         .form(&[
@@ -741,8 +773,10 @@ pub async fn ms_poll(
         .map_err(|_| Error::msg("微软令牌响应看不懂"))?;
     let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
     match error {
-        // 还没在浏览器里确认（或被要求放慢）：前端继续轮
-        "authorization_pending" | "slow_down" => return Ok(MsPoll::Pending),
+        // 还没在浏览器里确认：前端继续轮
+        "authorization_pending" => return Ok(MsPoll::Pending),
+        // RFC 8628：收到 slow_down 要把轮询间隔加长（前端 +5s）
+        "slow_down" => return Ok(MsPoll::SlowDown),
         "expired_token" => return Err(Error::msg("设备码过期了，请重新开始登录")),
         "authorization_declined" => return Err(Error::msg("你在浏览器里拒绝了授权")),
         "" => {}
@@ -771,7 +805,11 @@ pub async fn ms_poll(
         return Err(Error::msg("微软没有返回令牌，请重试"));
     }
 
-    let (mc_token, profile_id, profile_name) = ms_exchange_chain(client, &ms_token).await?;
+    // 从换票到保存是「写账户」的临界区：轮询本身（上面的 pending 分支）
+    // 不持锁，免得每次轮询都把登录/登出堵上十几秒
+    let _guard = state.account_lock.lock().await;
+    let (mc_token, profile_id, profile_name) =
+        ms_exchange_chain(&state.client, &ms_token).await?;
 
     let account = Account {
         kind: KIND_MICROSOFT.to_string(),
@@ -781,7 +819,7 @@ pub async fn ms_poll(
         ms_refresh_token: refresh_token,
         ..Account::default()
     };
-    account.save(paths)?;
+    account.save(&state.paths)?;
     Ok(MsPoll::Done {
         account: account.view(),
     })
@@ -842,7 +880,9 @@ async fn ms_exchange_chain(
         .map_err(|_| Error::msg("Xbox Live 的响应看不懂"))?;
     let (xbl_token, _uhs) = parse_xbox_token(&xbl_body)?;
 
-    // 2) XSTS。被拒时响应带 XErr 数字码，常见的两种直接翻译
+    // 2) XSTS。被拒时响应带 XErr 数字码，常见的两种直接翻译。
+    // RelyingParty 必须是 Minecraft 服务的 RP——用 xboxlive.com 的话 token
+    // 的 audience 不对，login_with_xbox 会 401（minecraft.wiki 的认证文档）。
     let xsts = client
         .post(XSTS_API)
         .timeout(Duration::from_secs(15))
@@ -851,7 +891,7 @@ async fn ms_exchange_chain(
                 "SandboxId": "RETAIL",
                 "UserTokens": [xbl_token],
             },
-            "RelyingParty": "http://xboxlive.com",
+            "RelyingParty": "rp://api.minecraftservices.com/",
             "TokenType": "JWT"
         }))
         .send()
@@ -1073,20 +1113,23 @@ mod tests {
 
     #[test]
     fn parses_injector_metadata() {
-        // checksums.sha256 的写法
-        let with_checksums: InjectorArtifact = serde_json::from_str(
-            r#"{"buildNumber":59,"version":"1.2.5","urls":["https://example.com/a.jar"],"checksums":{"sha256":"abc123"}}"#,
+        // 2026-10 实测的真实响应（字段是 download_url 单字符串 + snake_case）
+        let real: InjectorArtifact = serde_json::from_str(
+            r#"{"build_number":56,"version":"1.2.8",
+                "download_url":"https://authlib-injector.yushi.moe/artifact/56/authlib-injector-1.2.8.jar",
+                "checksums":{"sha256":"9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10"}}"#,
         )
         .unwrap();
-        assert_eq!(with_checksums.version, "1.2.5");
+        assert_eq!(real.version, "1.2.8");
+        assert!(real.download_url.ends_with("authlib-injector-1.2.8.jar"));
         assert_eq!(
-            with_checksums.checksums.unwrap().sha256,
-            "abc123"
+            real.checksums.unwrap().sha256,
+            "9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10"
         );
 
-        // 顶层 sha256 的写法
+        // 顶层 sha256 的旧格式也认
         let top_level: InjectorArtifact = serde_json::from_str(
-            r#"{"version":"1.3.0","urls":["https://example.com/b.jar"],"sha256":"def456"}"#,
+            r#"{"version":"1.3.0","download_url":"https://example.com/b.jar","sha256":"def456"}"#,
         )
         .unwrap();
         assert_eq!(top_level.sha256, "def456");

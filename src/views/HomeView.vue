@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import Icon from "../components/Icon.vue";
 import SkinAvatar from "../components/SkinAvatar.vue";
@@ -169,7 +169,16 @@ const pendingProfiles = ref<AuthProfileChoice[]>([]);
 
 // ---- 微软设备码登录 ----
 const msDevice = ref<MsDeviceCode | null>(null);
-let msPolling = false;
+/**
+ * 轮询代次号：取消、重开登录、组件卸载都递增它，旧循环醒来发现
+ * 代次变了就自行退出。共享布尔做不到这一点——重开时会把旧循环
+ * 「复活」成双循环，两个 device_code 并发轮询还会互相误杀。
+ */
+let msLoopId = 0;
+
+onUnmounted(() => {
+  msLoopId++;
+});
 
 onMounted(async () => {
   try {
@@ -215,6 +224,10 @@ async function authLogin() {
     notify("请填写皮肤站的邮箱和密码", "error");
     return;
   }
+  // 取消还在等待确认的设备码流程：否则玩家稍后在浏览器里点了确认，
+  // 微软账户会静默覆盖刚刚登录的皮肤站账户
+  msLoopId++;
+  msDevice.value = null;
   busyAuth.value = true;
   try {
     const result = await api.authLogin(
@@ -270,8 +283,8 @@ async function authLogout() {
       loggedIn: false,
     };
     pendingProfiles.value = [];
+    msLoopId++;
     msDevice.value = null;
-    msPolling = false;
     notify("已退出登录，回到离线模式", "info");
     await refreshAvatar();
   } catch (e) {
@@ -285,36 +298,43 @@ async function authLogout() {
 
 async function msBegin() {
   busyAuth.value = true;
+  const myLoop = ++msLoopId;
   try {
-    msDevice.value = await api.authMsBegin();
-    void api.openInBrowser(msDevice.value.verificationUri).catch(() => {
+    const device = await api.authMsBegin();
+    // 等待设备码期间用户可能已经取消或重开
+    if (myLoop !== msLoopId) return;
+    msDevice.value = device;
+    void api.openInBrowser(device.verificationUri).catch(() => {
       // 打不开浏览器就让玩家手动复制链接，不拦流程
     });
-    msPolling = true;
-    notify(
-      `请在弹出的页面输入代码 ${msDevice.value.userCode}`,
-      "info",
-    );
-    void msPollLoop(msDevice.value.deviceCode, msDevice.value.interval);
+    notify(`请在弹出的页面输入代码 ${device.userCode}`, "info");
+    void msPollLoop(device, myLoop);
   } catch (e) {
-    notify(errorText(e), "error");
+    if (myLoop === msLoopId) notify(errorText(e), "error");
   } finally {
     busyAuth.value = false;
   }
 }
 
-/** 按 interval 轮询直到授权完成、过期或被取消 */
-async function msPollLoop(deviceCode: string, interval: number) {
+/** 按后端给的间隔轮询，直到授权完成、过期或被取代 */
+async function msPollLoop(device: MsDeviceCode, myLoop: number) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  // 设备码有效期到了就停，避免无限轮询
-  const deadline = Date.now() + 15 * 60 * 1000;
-  while (msPolling && Date.now() < deadline) {
+  let interval = device.interval;
+  // 设备码寿命用后端返回的 expires_in，不自己拍 15 分钟
+  const deadline = Date.now() + (device.expiresIn || 900) * 1000;
+  let netFails = 0;
+  while (myLoop === msLoopId && Date.now() < deadline) {
     await sleep(interval * 1000);
-    if (!msPolling) return;
+    if (myLoop !== msLoopId) return;
     try {
-      const result = await api.authMsPoll(deviceCode);
+      const result = await api.authMsPoll(device.deviceCode);
+      netFails = 0;
+      if (result.state === "slowDown") {
+        interval += 5;
+        continue;
+      }
       if (result.state === "pending") continue;
-      msPolling = false;
+      // done
       if (result.account) {
         auth.value = result.account;
         msDevice.value = null;
@@ -323,21 +343,25 @@ async function msPollLoop(deviceCode: string, interval: number) {
       }
       return;
     } catch (e) {
-      msPolling = false;
-      msDevice.value = null;
-      notify(errorText(e), "error");
-      return;
+      // 网络瞬断不当场作废整个流程：连续 3 次失败才放弃（设备码通常还有效）
+      netFails += 1;
+      if (netFails >= 3) {
+        if (myLoop === msLoopId) {
+          msDevice.value = null;
+          notify(errorText(e), "error");
+        }
+        return;
+      }
     }
   }
-  if (msPolling) {
-    msPolling = false;
+  if (myLoop === msLoopId) {
     msDevice.value = null;
     notify("设备码过期了，请重新开始登录", "error");
   }
 }
 
 function msCancel() {
-  msPolling = false;
+  msLoopId++;
   msDevice.value = null;
 }
 

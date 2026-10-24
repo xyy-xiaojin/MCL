@@ -197,9 +197,9 @@ export interface MsDeviceCode {
   expiresIn: number;
 }
 
-/** 微软设备码轮询结果：pending = 继续轮，done = 登录完成。 */
+/** 微软设备码轮询结果：pending = 继续轮，slowDown = 间隔加 5 秒再轮，done = 登录完成。 */
 export interface MsPollResult {
-  state: "pending" | "done";
+  state: "pending" | "slowDown" | "done";
   account?: AuthAccountView;
 }
 

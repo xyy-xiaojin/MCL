@@ -245,6 +245,12 @@ pub struct AppState {
     /// 应用句柄。forge / jdk 这类不经过命令层的引擎模块发事件用
     /// （安装器的实时日志就是从这里推出去的）。
     pub app: tauri::AppHandle,
+    /// 账户文件的读改写锁。
+    ///
+    /// `launch_version` 的 token 续期是「读 → 网络（可达 10~25 秒）→ 写回」
+    /// 的长事务；期间玩家在首页登录/退出另一个账户，旧事务写回时会把
+    /// 新账户整个覆盖掉。所有动 account.json 的路径都在这把锁下走。
+    pub account_lock: tokio::sync::Mutex<()>,
 }
 
 /// 一个正在运行的游戏进程。
