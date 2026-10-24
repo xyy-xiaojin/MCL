@@ -201,6 +201,8 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<S
     }
     // 下载源要同步给队列，之后新入队的 URL 才会走新源
     state.queue.set_source(normalized.source.clone());
+    // 并发数也从下一批任务起跟着设置走
+    state.queue.set_concurrency(normalized.download_concurrency);
     Ok(normalized)
 }
 

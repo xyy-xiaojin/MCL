@@ -174,6 +174,8 @@ pub struct Settings {
     pub java_path: String,
     pub username: String,
     pub theme: String,
+    /// 同时下载的文件数（设置页可调，1–32）。默认 10：再高容易被镜像限流。
+    pub download_concurrency: u32,
     /// 玩家导入的离线皮肤（PNG 绝对路径）。空串表示用内置的 Steve。
     ///
     /// 只影响头像显示，不会改写 `game/` 里的任何东西：0.01 只有离线账号，
@@ -192,6 +194,7 @@ impl Default for Settings {
             java_path: String::new(),
             username: "Player".to_string(),
             theme: "dark".to_string(),
+            download_concurrency: 10,
             skin_path: String::new(),
         }
     }
@@ -222,6 +225,7 @@ impl Settings {
             out.username = "Player".to_string();
         }
         out.skin_path = out.skin_path.trim().to_string();
+        out.download_concurrency = out.download_concurrency.clamp(1, 32);
         out
     }
 }

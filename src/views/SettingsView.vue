@@ -164,6 +164,32 @@ async function revealPath(value: string) {
             </div>
           </div>
 
+          <!-- 下载并发：一个滑块 + 一句话，改完从下一批任务起生效 -->
+          <div class="pt-1">
+            <div class="flex items-baseline justify-between">
+              <span class="text-xs font-semibold text-ink-500">同时下载文件数</span>
+              <span class="font-mono text-xs font-bold text-brand-200">
+                {{ state.settings.downloadConcurrency ?? 10 }}
+              </span>
+            </div>
+            <input
+              v-model.number="state.settings.downloadConcurrency"
+              type="range"
+              min="1"
+              max="32"
+              step="1"
+              class="mt-2 w-full accent-brand-600"
+            />
+            <div class="mt-1 flex justify-between text-[10px] font-medium text-ink-300">
+              <span>1 慢而稳</span>
+              <span>默认 10</span>
+              <span>32 激进</span>
+            </div>
+            <p class="mt-1.5 text-[11px] leading-relaxed text-ink-400">
+              网络好可以调大更快；被镜像限流（下载频繁失败）就调小。大文件另有 16 线程分片，不受这个影响。
+            </p>
+          </div>
+
           <p class="text-[11px] leading-relaxed text-ink-400">
             选择镜像时，元数据、依赖库、资源地址会被重写到 bmclapi2.bangbang93.com；
             官方源直连 Mojang。修改后对新入队的下载生效。

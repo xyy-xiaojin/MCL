@@ -7,7 +7,7 @@
 //! 拉取任务用 `buffer_unordered` 限流，进度通过 Tauri Event 节流推送。
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -27,8 +27,11 @@ pub const EVENT_CHANGED: &str = "queue://changed";
 ///
 /// assets 是几千个小文件，这类工作量靠"文件级并发"提速最有效；
 /// 单个大文件则靠 [`download`] 的分片并发。
-/// 10 是个经验值：再高容易触发 BMCLAPI 的限流，反而更慢。
-const CONCURRENT_FILES: usize = 10;
+/// 默认 10 是个经验值：再高容易触发 BMCLAPI 的限流，反而更慢。
+/// 设置页可以调（见 [`Queue::set_concurrency`]），范围如下。
+const DEFAULT_CONCURRENT: u32 = 10;
+const MIN_CONCURRENT: u32 = 1;
+const MAX_CONCURRENT: u32 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -191,6 +194,9 @@ pub struct Queue {
     counter: AtomicU64,
     group_counter: AtomicU64,
     source: Mutex<String>,
+    /// 同时下载的文件数（设置页可调）。work() 每一轮循环都现读，
+    /// 改完设置从下一批任务起生效，正在跑的不打断。
+    concurrent: AtomicU32,
     /// 是否已经排了一次"合并推送"（见 `emit_changed_coalesced`）
     flush_scheduled: AtomicBool,
     /// 有任务结束时的唤醒信号，`wait()` 靠它即时返回
@@ -198,7 +204,12 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn new(app: AppHandle, client: reqwest::Client, source: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        app: AppHandle,
+        client: reqwest::Client,
+        source: impl Into<String>,
+        concurrent: u32,
+    ) -> Arc<Self> {
         Arc::new(Self {
             app,
             client,
@@ -210,6 +221,7 @@ impl Queue {
             counter: AtomicU64::new(1),
             group_counter: AtomicU64::new(1),
             source: Mutex::new(source.into()),
+            concurrent: AtomicU32::new(concurrent.clamp(MIN_CONCURRENT, MAX_CONCURRENT)),
             flush_scheduled: AtomicBool::new(false),
             finished_signal: Notify::new(),
         })
@@ -222,6 +234,18 @@ impl Queue {
 
     pub fn set_source(&self, source: impl Into<String>) {
         *self.source.lock().unwrap_or_else(|e| e.into_inner()) = source.into();
+    }
+
+    /// 调整同时下载的文件数。下一批任务起生效。
+    pub fn set_concurrency(self: &Arc<Self>, files: u32) {
+        self.concurrent
+            .store(files.clamp(MIN_CONCURRENT, MAX_CONCURRENT), Ordering::SeqCst);
+        // 空闲队列改大并发后没有 worker 在跑，踢一脚让它按新并发开工
+        self.kick();
+    }
+
+    fn concurrency(&self) -> usize {
+        self.concurrent.load(Ordering::SeqCst) as usize
     }
 
     pub fn is_paused(&self) -> bool {
@@ -527,7 +551,9 @@ impl Queue {
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
-            let batch = self.take_batch(CONCURRENT_FILES);
+            // 每一轮都按当前设置取并发数：改设置从下一批起生效
+            let concurrent = self.concurrency();
+            let batch = self.take_batch(concurrent);
             if batch.is_empty() {
                 return;
             }
@@ -540,7 +566,7 @@ impl Queue {
                 });
             }
             futures_util::stream::iter(futures)
-                .buffer_unordered(CONCURRENT_FILES)
+                .buffer_unordered(concurrent)
                 .collect::<Vec<()>>()
                 .await;
             self.emit_changed_coalesced();

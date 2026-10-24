@@ -22,6 +22,8 @@ export interface Settings {
   javaPath: string;
   username: string;
   theme: string;
+  /** 同时下载的文件数（1–32，默认 10） */
+  downloadConcurrency: number;
   /** 导入的离线皮肤 PNG 路径，空串表示用内置 Steve */
   skinPath: string;
 }

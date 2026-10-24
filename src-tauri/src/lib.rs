@@ -31,6 +31,7 @@ pub fn run() {
                 app.handle().clone(),
                 client.clone(),
                 settings.source.clone(),
+                settings.download_concurrency,
             );
             app.manage(state::AppState {
                 paths,
