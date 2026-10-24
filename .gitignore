@@ -17,3 +17,6 @@ src-tauri/resources/netplay/*.sys
 /MCL.exe
 /resources/
 /MCL
+
+# 开发过程文档（本地保留，不进仓库）
+notes/
