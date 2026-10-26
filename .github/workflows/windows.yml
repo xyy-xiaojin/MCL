@@ -1,5 +1,5 @@
-# Windows 版自动编译：push 到 main（或手动触发）时，在 GitHub 的 Windows
-# 云机器上出 release exe 并打包成免安装 zip。
+# Windows 版手动编译：在 GitHub Actions 页面点 "Run workflow" 时，在
+# Windows 云机器上出 release exe 并打包成免安装 zip（push 不会自动编译）。
 #
 # 为什么走 CI：开发机的 Smart App Control 会随机拦截新编译的 build script
 # （os error 4551），本机 release 要靠 build_retry.sh 反复重试；CI 的机器
@@ -14,8 +14,6 @@
 name: build-windows
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch: {}
 
 jobs:
