@@ -40,8 +40,10 @@ async function load() {
   // 版本隔离后 mod 是按版本分的：没选版本就没有"这个版本的 mod 列表"可看
   if (!state.selectedVersion) {
     loadSeq++;
+    diagSeq++; // 在途的诊断响应也不许把已清空的横幅"复活"
     mods.value = [];
     issues.value = [];
+    loading.value = false;
     return;
   }
   const seq = ++loadSeq;

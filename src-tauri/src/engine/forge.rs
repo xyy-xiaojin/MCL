@@ -619,8 +619,15 @@ pub(crate) fn rehome(paths: &crate::state::Paths, created: &str, target: &str) -
     for entry in std::fs::read_dir(&from)?.flatten() {
         let dest = to.join(entry.file_name());
         if std::fs::rename(entry.path(), &dest).is_err() {
-            // 跨卷（数据目录被链接到别的盘）时退回拷贝
-            std::fs::copy(entry.path(), &dest)?;
+            // 跨卷（数据目录被链接到别的盘）时退回拷贝。
+            // fs::copy 只能拷文件：目录（game/ 等）必须递归拷，
+            // 否则半路报错、新旧两个残目录并存，重试还会被重名拒绝。
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                crate::engine::install::copy_dir_all_pub(&entry.path(), &dest)?;
+            } else {
+                std::fs::copy(entry.path(), &dest)?;
+            }
         }
     }
     std::fs::remove_dir_all(&from)?;

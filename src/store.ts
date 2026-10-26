@@ -40,6 +40,8 @@ export const state = reactive({
     javaPath: "",
     username: "Player",
     theme: "dark",
+    skinPath: "",
+    downloadConcurrency: 10,
   } as Settings,
   /** 后端算好的内存方案，进首页 / 改设置 / 换版本时刷新 */
   memory: null as MemoryView | null,

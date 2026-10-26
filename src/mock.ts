@@ -211,6 +211,7 @@ export const browserMock: Record<string, (args?: any) => unknown> = {
     username: "Player",
     theme: "dark",
     skinPath: "",
+    downloadConcurrency: 10,
   }),
   memory_plan: (args) => {
     const mods = 187;

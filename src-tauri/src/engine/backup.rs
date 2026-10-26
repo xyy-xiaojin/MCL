@@ -61,10 +61,9 @@ fn zip_name_from_millis(millis: i64) -> String {
 }
 
 fn millis_from_zip_name(name: &str) -> Option<i64> {
-    name.strip_prefix("saves-")?
-        .strip_suffix(".zip")?
-        .parse()
-        .ok()
+    let body = name.strip_prefix("saves-")?.strip_suffix(".zip")?;
+    // 冲突名形如 saves-<ms>-<n>.zip：时间戳取第一个 '-' 之前
+    body.split('-').next()?.parse().ok()
 }
 
 /// 把一个目录递归打成 zip。空目录返回 `Ok(None)`（没东西可备）。
@@ -98,24 +97,32 @@ fn zip_dir(source: &Path, target: &Path) -> Result<Option<u64>> {
     Ok(Some(total))
 }
 
-/// 收集要备份的文件。深度和数量有上限，防止软链接环或异常目录拖垮备份。
+/// 收集要备份的文件。深度有上限防异常目录；跳过符号链接防环。
+/// 数量超上限**报错**而不是静默截断——一份"看起来成功"的半截备份，
+/// 玩家还原时才发现存档丢了一半，比备份失败更糟。
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
     const MAX_DEPTH: usize = 16;
     const MAX_FILES: usize = 60_000;
-    if depth > MAX_DEPTH || out.len() > MAX_FILES {
+    if depth > MAX_DEPTH {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        // 只跟文件和目录，跳过符号链接（防环）
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        if meta.is_dir() {
+        // file_type 不跟随链接：指向目录的 junction/symlink 不会被当目录递归
+        let Ok(file_type) = entry.file_type() else { continue };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_files(root, &path, out, depth + 1)?;
-        } else if meta.is_file() {
+        } else if file_type.is_file() {
             out.push(path);
             if out.len() > MAX_FILES {
-                return Ok(());
+                return Err(Error::msg(format!(
+                    "存档文件超过 {} 个，备份中止。存档目录可能指错了地方",
+                    MAX_FILES
+                )));
             }
         }
     }
@@ -125,6 +132,13 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, depth: usize) 
 /// 手动/自动创建一份备份。没有存档（空目录/不存在）时返回 `Ok(None)`，
 /// 调用方据此给出"这个版本没有存档"的提示而不是报错。
 pub fn create(paths: &Paths, version_id: &str) -> Result<Option<BackupInfo>> {
+    create_impl(paths, version_id, true)
+}
+
+/// `prune = false` 给「还原前快照」用：还原目标可能是较旧的备份，
+/// 快照后立刻 prune 会把总数压回上限、可能恰好删掉正要还原的那份。
+/// 快照超一份上限无害，下次正常备份时会收敛。
+fn create_impl(paths: &Paths, version_id: &str, prune: bool) -> Result<Option<BackupInfo>> {
     let saves = paths.saves(version_id);
     if !saves.is_dir() {
         return Ok(None);
@@ -146,13 +160,21 @@ pub fn create(paths: &Paths, version_id: &str) -> Result<Option<BackupInfo>> {
     }
     let target = dir.join(&name);
     let temp = dir.join(format!("{name}.tmp"));
-    let zipped = zip_dir(&saves, &temp)?;
+    let zipped = match zip_dir(&saves, &temp) {
+        Ok(zipped) => zipped,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(err);
+        }
+    };
     let Some(bytes) = zipped else {
         let _ = std::fs::remove_file(&temp);
         return Ok(None);
     };
     std::fs::rename(&temp, &target)?;
-    prune(&dir);
+    if prune {
+        prune_backups(&dir);
+    }
 
     Ok(Some(BackupInfo {
         file: name,
@@ -162,7 +184,7 @@ pub fn create(paths: &Paths, version_id: &str) -> Result<Option<BackupInfo>> {
 }
 
 /// 只保留最近 [`KEEP`] 份，其余删除。
-fn prune(dir: &Path) {
+fn prune_backups(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut backups: Vec<(i64, PathBuf)> = entries
         .flatten()
@@ -207,24 +229,41 @@ pub fn restore(paths: &Paths, version_id: &str, file: &str) -> Result<()> {
     // file 是我们列出来的文件名，仍然校验一下，不接受路径分隔符
     sanitize_id(file)?;
     let zip_path = dir.join(file);
-    if !zip_path.is_file() {
-        return Err(Error::msg("这份备份不存在，可能已被删除"));
-    }
+    // 先把目标 zip 打开握在手里再做快照：快照会让总数超过保留上限触发
+    // prune，如果目标恰好是最旧的，晚一步打开它就被自己人删了
+    let zip_handle = std::fs::File::open(&zip_path)
+        .map_err(|_| Error::msg("这份备份不存在，可能已被删除"))?;
 
     let saves = paths.saves(version_id);
     if saves.is_dir() && std::fs::read_dir(&saves).map(|mut d| d.next().is_some()).unwrap_or(false)
     {
-        create(paths, version_id)?;
+        create_impl(paths, version_id, false)?;
     }
 
-    // 解压到暂存目录，成功后整体替换，中途失败不伤现有存档
+    // 解压到暂存目录，成功后整体替换，中途失败不伤现有存档。
+    // 目录名带原子计数：同一毫秒并发还原不会共用一个暂存目录互删。
+    // 顺带清扫上次失败/被杀进程留下的旧暂存目录。
     let parent = saves
         .parent()
         .ok_or_else(|| Error::msg("存档目录没有父目录"))?;
     std::fs::create_dir_all(parent)?;
-    let staged = parent.join(format!(".saves-restore-{}", now_millis()));
+    static RESTORE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = RESTORE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".saves-restore-")
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let staged = parent.join(format!(".saves-restore-{seq}-{}", now_millis()));
     let _ = std::fs::remove_dir_all(&staged);
     std::fs::create_dir_all(&staged)?;
+    drop(zip_handle);
 
     let result = extract_zip(&zip_path, &staged);
     if let Err(err) = result {
@@ -343,7 +382,7 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(zip_name_from_millis(index)), b"fake").unwrap();
         }
-        prune(&version_backups_dir(&paths, "v").unwrap());
+        prune_backups(&version_backups_dir(&paths, "v").unwrap());
         let left = list(&paths, "v").unwrap();
         assert_eq!(left.len(), KEEP);
         // 留下的是时间戳最大的那些

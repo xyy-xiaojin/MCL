@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 
 import Icon from "../components/Icon.vue";
 import { LOADER_LABEL } from "../labels";
@@ -243,6 +243,16 @@ function toggleMenu(id: string) {
   menuOpen.value = menuOpen.value === id ? "" : id;
 }
 
+// 点到菜单以外的地方就收起（点开菜单后点页面任何空白都该关掉）
+function onDocumentClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("[data-ver-menu]")) {
+    menuOpen.value = "";
+  }
+}
+onMounted(() => document.addEventListener("click", onDocumentClick));
+onUnmounted(() => document.removeEventListener("click", onDocumentClick));
+
 /** 复制/重命名共用的小输入弹层 */
 const idEditor = ref<{
   version: LocalVersion;
@@ -271,6 +281,7 @@ async function repairVersion(version: LocalVersion) {
   );
   if (!ok) return;
   repairing.value = version.id;
+  notify(`正在校验「${version.id}」的游戏文件…`, "info");
   try {
     const report = await api.repairVersion(version.id);
     notify(`修复完成：校验 ${report.files} 个文件（完好的已跳过）`, "success");
@@ -299,10 +310,14 @@ async function applyIdEdit() {
       await api.renameVersion(editor.version.id, newId);
       notify(`已改名为「${newId}」`, "success");
     }
-    idEditor.value = null;
+    // 只关"还是当初那个"的弹层：大版本复制耗时几秒，期间玩家可能
+    // 关掉重开过，晚到的完成不能把新弹层误关掉
+    if (idEditor.value === editor) {
+      idEditor.value = null;
+      state.selectedVersion = newId;
+    }
     await refreshLocal();
     await refreshRemote();
-    state.selectedVersion = newId;
   } catch (e) {
     notify(errorText(e), "error");
   } finally {
@@ -325,12 +340,18 @@ function openBackups(version: LocalVersion) {
   void loadBackups();
 }
 
+// 列表请求代际号：快速切换不同版本的备份弹层时，
+// 慢的旧响应不能覆盖新目标（否则显示 B 的名字、列着 A 的备份）
+let backupsSeq = 0;
+
 async function loadBackups() {
   if (!backupTarget.value) return;
+  const seq = ++backupsSeq;
   try {
-    backups.value = await api.backupList(backupTarget.value.id);
+    const list = await api.backupList(backupTarget.value.id);
+    if (seq === backupsSeq) backups.value = list;
   } catch (e) {
-    notify(errorText(e), "error");
+    if (seq === backupsSeq) notify(errorText(e), "error");
   }
 }
 
@@ -582,7 +603,7 @@ async function installLoader(gameVersion: string, loader: string) {
           >
             导出
           </button>
-          <div class="relative">
+          <div class="relative" data-ver-menu>
             <button
               class="btn-ghost !px-2.5 !py-2 !text-xs"
               title="复制 / 重命名"
@@ -897,7 +918,7 @@ async function installLoader(gameVersion: string, loader: string) {
     <div
       v-if="idEditor"
       class="fixed inset-0 z-[75] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
-      @click.self="idEditor = null"
+      @click.self="!idBusy && (idEditor = null)"
     >
       <div class="w-full max-w-sm rounded-2xl border border-line bg-surface p-5 shadow-pop">
         <div class="text-sm font-extrabold text-ink-900">
@@ -936,7 +957,7 @@ async function installLoader(gameVersion: string, loader: string) {
     <div
       v-if="backupTarget"
       class="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
-      @click.self="backupTarget = null"
+      @click.self="!backupBusy && (backupTarget = null)"
     >
       <div class="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-pop">
         <div class="flex items-start justify-between gap-3">
@@ -946,7 +967,12 @@ async function installLoader(gameVersion: string, loader: string) {
               {{ backupTarget.id }}
             </p>
           </div>
-          <button class="btn-ghost !px-2 !py-1.5" title="关闭" @click="backupTarget = null">
+          <button
+            class="btn-ghost !px-2 !py-1.5"
+            title="关闭"
+            :disabled="backupBusy"
+            @click="backupTarget = null"
+          >
             <Icon name="close" :size="15" />
           </button>
         </div>

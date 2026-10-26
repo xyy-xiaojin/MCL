@@ -218,9 +218,16 @@ const accountLabel = computed(() => {
 async function switchAccount(index: number | null) {
   if (busyAuth.value) return;
   busyAuth.value = true;
+  // 上一个账户的多角色待选列表不能再留着：那是对着"表单区"的，
+  // 切换后点它会去改别的账户的会话（后端会拦，但 UI 先不该给）
+  pendingProfiles.value = [];
   try {
     auth.value = await api.authSetActive(index);
-    const name = index === null ? "离线模式" : activeAccount.value?.profileName || "";
+    const active = activeAccount.value;
+    const name =
+      index === null
+        ? "离线模式"
+        : active?.profileName || active?.loginEmail || "未选角色的账户";
     notify(`已切换到 ${name}`, "info");
     await refreshAvatar();
     const kind = activeAccount.value?.kind;
@@ -279,6 +286,9 @@ async function authLogin() {
     }
   } catch (e) {
     notify(errorText(e), "error");
+    // 后端"无角色"分支是先落盘、再报 Err——账户其实已经进了列表，
+    // 不刷新的话 chips 和身份角标还停留在旧状态
+    await refreshAuthStatus();
   } finally {
     busyAuth.value = false;
   }
@@ -371,12 +381,21 @@ async function msPollLoop(device: MsDeviceCode, myLoop: number) {
       }
       return;
     } catch (e) {
+      const text = errorText(e);
+      // 终态错误（过期/拒绝）立刻终止，不再走瞬断重试白等三轮
+      if (text.includes("过期") || text.includes("拒绝")) {
+        if (myLoop === msLoopId) {
+          msDevice.value = null;
+          notify(text, "error");
+        }
+        return;
+      }
       // 网络瞬断不当场作废整个流程：连续 3 次失败才放弃（设备码通常还有效）
       netFails += 1;
       if (netFails >= 3) {
         if (myLoop === msLoopId) {
           msDevice.value = null;
-          notify(errorText(e), "error");
+          notify(text, "error");
         }
         return;
       }
