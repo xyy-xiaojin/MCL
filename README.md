@@ -42,4 +42,6 @@ src-tauri/resources/netplay/ 联机组件（二进制，需自行获取）
 
 ## 许可证
 
+Copyright (C) 2026 xyy-xiaojin
+
 [GPL-3.0](LICENSE) —— 可以自由使用、修改、分发；但**分发修改版必须同样以 GPL-3.0 开源**并提供源码。
