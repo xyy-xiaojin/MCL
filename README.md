@@ -39,3 +39,7 @@ src-tauri/resources/netplay/ 联机组件（二进制，需自行获取）
 ```
 
 > 登录令牌只存本地 `account.json`，密码从不落盘。
+
+## 许可证
+
+[MIT](LICENSE)
