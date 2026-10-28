@@ -174,6 +174,12 @@ impl Names {
 /// - `urls` 是主备地址，第一段失败会换第二个，每轮带退避；
 /// - 目标已存在且校验通过 → 直接跳过；
 /// - 分片直接写进成品临时文件，失败不会留下半截"正式文件"。
+/// 停止探针：返回 true 时下载循环尽快中止（用户取消）。
+/// 用 `Arc` 包闭包是为了能 clone 进分片并发任务。
+pub type StopFn = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// 不带取消的便捷入口（测试与旧调用方用）。
+#[allow(dead_code)] // 目前没有调用方，留着给测试和后续"不需要取消"的场景
 pub async fn fetch_to_file(
     client: &reqwest::Client,
     urls: &[String],
@@ -181,6 +187,21 @@ pub async fn fetch_to_file(
     expected_sha1: Option<&str>,
     expected_size: Option<u64>,
     on_progress: Progress<'_>,
+) -> Result<()> {
+    let stop: StopFn = std::sync::Arc::new(|| false);
+    fetch_to_file_stoppable(client, urls, dest, expected_sha1, expected_size, on_progress, &stop)
+        .await
+}
+
+/// 带取消的下载：`stop()` 命中后，每个 chunk 循环都会尽快退出并清理临时文件。
+pub async fn fetch_to_file_stoppable(
+    client: &reqwest::Client,
+    urls: &[String],
+    dest: &Path,
+    expected_sha1: Option<&str>,
+    expected_size: Option<u64>,
+    on_progress: Progress<'_>,
+    stop: &StopFn,
 ) -> Result<()> {
     if urls.is_empty() {
         return Err(Error::msg("没有可用的下载地址"));
@@ -200,10 +221,18 @@ pub async fn fetch_to_file(
     // 1) 大小已知且够大 → 分片并行，每段直写目标文件
     let mut source: Option<PathBuf> = None;
     let mut digest: Option<String> = None;
+    if stop() {
+        clean_parts(parent, &names);
+        return Err(Error::msg("已取消"));
+    }
     if let Some(size) = expected_size.filter(|size| segment_count(*size) > 1) {
-        if fetch_segmented(client, urls, parent, &names, size, on_progress)
-            .await
-            .is_ok()
+        let segmented = fetch_segmented(client, urls, parent, &names, size, on_progress, stop).await;
+        // 取消必须立刻冒泡：否则下面会退回单连接从头再下，"取消"形同虚设
+        if segmented.is_err() && stop() {
+            clean_parts(parent, &names);
+            return Err(Error::msg("已取消"));
+        }
+        if segmented.is_ok()
         {
             let path = names.merging(parent);
             // 段是并发写的，哈希只能顺序算：这里还剩一趟读，
@@ -219,8 +248,14 @@ pub async fn fetch_to_file(
     let source = match source {
         Some(path) => path,
         None => {
-            let (path, streamed) =
-                fetch_single(client, urls, parent, &names, expected_size, on_progress).await?;
+            let outcome =
+                fetch_single(client, urls, parent, &names, expected_size, on_progress, stop).await;
+            // 同上：取消立即退出并清理，不给重试/续传留机会
+            if outcome.is_err() && stop() {
+                clean_parts(parent, &names);
+                return Err(Error::msg("已取消"));
+            }
+            let (path, streamed) = outcome?;
             digest = streamed;
             path
         }
@@ -309,6 +344,7 @@ pub fn segment_ranges(size: u64, count: usize) -> Vec<(u64, u64)> {
 ///
 /// 哈希只在"从 0 开始下"时有效：续传时前半段已经落盘，没法凭空补算，
 /// 返回 `None` 交给调用方整盘读一遍。
+#[allow(clippy::too_many_arguments)]
 async fn fetch_single(
     client: &reqwest::Client,
     urls: &[String],
@@ -316,6 +352,7 @@ async fn fetch_single(
     names: &Names,
     size: Option<u64>,
     on_progress: Progress<'_>,
+    stop: &StopFn,
 ) -> Result<(PathBuf, Option<String>)> {
     let tmp = names.single(parent);
     let policy = RetryPolicy::default();
@@ -326,7 +363,7 @@ async fn fetch_single(
     let result = net::for_each_endpoint(urls, policy, |url| {
         let tmp = tmp_for_op.clone();
         async move {
-            match stream_once(client, &url, &tmp, size, on_progress).await {
+            match stream_once(stop, client, &url, &tmp, size, on_progress).await {
                 Ok(maybe_digest) => {
                     if let Some(found) = maybe_digest {
                         if let Ok(mut slot) = digest_ref.lock() {
@@ -356,6 +393,7 @@ async fn fetch_single(
 
 /// 一次单连接尝试：从 `tmp` 现有长度处续传（服务器支持 Range 的话）。
 async fn stream_once(
+    stop: &StopFn,
     client: &reqwest::Client,
     url: &str,
     tmp: &Path,
@@ -421,6 +459,10 @@ async fn stream_once(
     let mut written = if appending { already } else { 0 };
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
+        // 取消探针：命中立即退出，临时文件由上层清理
+        if stop() {
+            return Err((FailureKind::Cancelled, "已取消".to_string()));
+        }
         let bytes = chunk.map_err(|e| (FailureKind::Transient, format!("传输中断：{e}")))?;
         if let Some(hasher) = hasher.as_mut() {
             hasher.update(&bytes);
@@ -606,6 +648,7 @@ async fn fetch_segmented(
     names: &Names,
     size: u64,
     on_progress: Progress<'_>,
+    stop: &StopFn,
 ) -> Result<()> {
     // 先确认地址支持分段，否则后面的活都白干
     if !supports_range(client, &urls[0]).await {
@@ -643,6 +686,7 @@ async fn fetch_segmented(
         let progress = Arc::clone(&progress);
         let done = Arc::clone(&done);
         let target = target.clone();
+        let stop = Arc::clone(stop);
         futures.push(async move {
             let want = end - start + 1;
             if progress.get(index) >= want {
@@ -652,9 +696,13 @@ async fn fetch_segmented(
                 let target = target.clone();
                 let progress = Arc::clone(&progress);
                 let done = Arc::clone(&done);
+                let stop = Arc::clone(&stop);
                 async move {
                     if progress.get(index) >= want {
                         return Ok(());
+                    }
+                    if stop() {
+                        return Err(Errored::new(FailureKind::Cancelled, "已取消".to_string()));
                     }
                     download_range(
                         client,
@@ -667,6 +715,7 @@ async fn fetch_segmented(
                         &done,
                         size,
                         on_progress,
+                        &stop,
                     )
                     .await
                     .map_err(|(kind, message)| Errored::new(kind, message))
@@ -697,6 +746,7 @@ async fn fetch_segmented(
 ///
 /// 重试时不清零：进度表记到哪就从哪继续，只补剩下的部分。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn download_range(
     client: &reqwest::Client,
     url: &str,
@@ -708,6 +758,7 @@ async fn download_range(
     done: &AtomicU64,
     size: u64,
     on_progress: Progress<'_>,
+    stop: &StopFn,
 ) -> std::result::Result<(), (FailureKind, String)> {
     let from = start + progress.get(index);
     if from > end {
@@ -743,6 +794,11 @@ async fn download_range(
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
+        // 取消探针：每个 chunk 检查一次，命中立即中止（分片写入的是
+        // .merging 临时文件，上层 fetch_to_file_stoppable 会统一清理）
+        if stop() {
+            return Err((FailureKind::Cancelled, "已取消".to_string()));
+        }
         let bytes = chunk.map_err(|e| (FailureKind::Transient, format!("传输中断：{e}")))?;
         file.write_all(&bytes)
             .await

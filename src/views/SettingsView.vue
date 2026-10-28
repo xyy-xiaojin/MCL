@@ -86,10 +86,6 @@ const memoryGb = computed(() =>
   ((state.memory?.effectiveMaxMb ?? state.settings.maxMemoryMb) / 1024).toFixed(1),
 );
 
-const recommendLabel = computed(
-  () => `${((state.memory?.plan.recommendMb ?? 0) / 1024).toFixed(1)} GB`,
-);
-
 async function save() {
   await saveSettings();
   // 用户可能刚装了 Java：这里无视缓存重新探测一次
@@ -114,12 +110,13 @@ async function revealPath(value: string) {
 
 <template>
   <!--
-    四张设置卡铺满剩余高度（2×2），页面本身不滚动：每张卡的标题固定，
-    正文区在内容超出时自己滚。底部「保存」与「关于」常驻。
+    三张设置卡铺满剩余高度：上面一行「下载源 / 内存与账户」，Java 路径横跨
+    两列压在下面。页面本身不滚动，每张卡的正文区在内容超出时自己滚；
+    底部「保存」与「关于」常驻。
   -->
   <div class="flex h-full min-h-0 flex-col gap-3">
     <div
-      class="grid min-h-0 flex-1 auto-rows-fr gap-3 overflow-hidden lg:grid-cols-2 lg:grid-rows-[1fr_1.45fr]"
+      class="grid min-h-0 flex-1 auto-rows-min content-start gap-3 overflow-y-auto lg:grid-cols-2"
     >
       <!-- 下载源 -->
       <section class="card flex min-h-0 flex-col p-4">
@@ -185,112 +182,31 @@ async function revealPath(value: string) {
               <span>默认 10</span>
               <span>32 激进</span>
             </div>
-            <p class="mt-1.5 text-[11px] leading-relaxed text-ink-400">
-              网络好可以调大更快；被镜像限流（下载频繁失败）就调小。大文件另有 16 线程分片，不受这个影响。
+            <p class="mt-1.5 text-[10px] leading-relaxed text-ink-400">
+              调高更快；被镜像限流（频繁失败）就调小。大文件另有 16 线程分片。
             </p>
           </div>
 
-          <p class="text-[11px] leading-relaxed text-ink-400">
-            选择镜像时，元数据、依赖库、资源地址会被重写到 bmclapi2.bangbang93.com；
-            官方源直连 Mojang。修改后对新入队的下载生效。
+          <p class="text-[10px] leading-relaxed text-ink-400">
+            镜像会重写元数据/依赖/资源地址到 bmclapi2.bangbang93.com；改动对新入队的下载生效。
           </p>
         </div>
       </section>
 
-      <!-- 主题 -->
-      <section class="card flex min-h-0 flex-col p-4">
-        <div class="mb-3 flex shrink-0 items-center gap-2 text-sm font-bold text-ink-900">
-          <Icon name="bolt" :size="18" class="text-brand-300" />
-          主题
-        </div>
-
-        <div class="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div class="flex gap-2">
-            <button
-              class="flex-1 rounded-xl border-2 px-3 py-3 text-left transition-all duration-200"
-              :class="
-                state.settings.theme === 'dark'
-                  ? 'border-brand-400/70 bg-brand-500/[0.14]'
-                  : 'border-line hover:border-brand-300/60'
-              "
-              @click="state.settings.theme = 'dark'"
-            >
-              <div class="flex items-center gap-2 text-xs font-bold text-ink-900">
-                <span
-                  class="h-3 w-3 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 shadow-[0_0_10px_rgba(139,92,246,0.8)]"
-                />
-                深色（默认）
-              </div>
-              <div class="mt-1 text-[10px] text-ink-400">冷黑底 + 电光紫强调</div>
-            </button>
-            <div
-              class="flex-1 cursor-not-allowed rounded-xl border-2 border-dashed border-line px-3 py-3 opacity-60"
-            >
-              <div class="text-xs font-bold text-ink-400">浅色</div>
-              <div class="mt-1 text-[10px] text-ink-300">暂未实现</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 内存与账户 -->
+      <!-- 性能与账户：内存分配只在首页（启动前最常调），这里去重 -->
       <section class="card flex min-h-0 flex-col p-4">
         <div class="mb-3 flex shrink-0 items-center gap-2 text-sm font-bold text-ink-900">
           <Icon name="cpu" :size="18" class="text-brand-300" />
-          内存与账户
+          性能与账户
         </div>
 
         <div class="min-h-0 flex-1 space-y-3.5 overflow-y-auto pr-1">
-          <div>
-            <div class="mb-1 flex items-center justify-between">
-              <span class="label !mb-0">内存分配</span>
-              <span class="chip bg-brand-500/[0.16] text-brand-200">{{ memoryGb }} GB</span>
-            </div>
-            <div class="flex gap-2">
-              <button
-                class="flex-1 rounded-xl px-3 py-2 text-xs font-bold transition-colors duration-200"
-                :class="
-                  autoRam
-                    ? 'bg-brand-600 text-white'
-                    : 'bg-surface-sunken text-ink-500 hover:text-brand-200'
-                "
-                @click="state.settings.ramType = 'auto'"
-              >
-                自动推荐
-              </button>
-              <button
-                class="flex-1 rounded-xl px-3 py-2 text-xs font-bold transition-colors duration-200"
-                :class="
-                  !autoRam
-                    ? 'bg-brand-600 text-white'
-                    : 'bg-surface-sunken text-ink-500 hover:text-brand-200'
-                "
-                @click="state.settings.ramType = 'manual'"
-              >
-                手动指定
-              </button>
-            </div>
-
-            <input
-              v-if="!autoRam"
-              v-model.number="state.settings.maxMemoryMb"
-              type="range"
-              min="1024"
-              max="16384"
-              step="512"
-              class="mt-3 w-full accent-brand-600"
-            />
-            <p class="mt-2 text-[11px] leading-relaxed text-ink-400">
-              <template v-if="autoRam">
-                按 mod 数量与当前可用内存计算，当前建议
-                <span class="font-bold text-brand-200">{{ recommendLabel }}</span>
-                （{{ state.memory?.plan.reason || "原版" }}）。
-              </template>
-              <template v-else>
-                始终使用上面的值。大整合包（300+ mod）通常需要 6–8 GB。
-              </template>
-            </p>
-          </div>
+          <p class="rounded-xl bg-surface-sunken px-3 py-2 text-[11px] leading-relaxed text-ink-400">
+            内存分配在首页「内存分配」卡里调整（当前
+            <span class="font-bold text-brand-200">{{ memoryGb }} GB</span>，{{
+              autoRam ? "自动推荐" : "手动指定"
+            }}）。
+          </p>
 
           <div>
             <span class="label">GC 优化</span>
@@ -315,8 +231,8 @@ async function revealPath(value: string) {
         </div>
       </section>
 
-      <!-- Java -->
-      <section class="card flex min-h-0 flex-col p-4">
+      <!-- Java：横跨两列，输入框和检测结果并排，不留空 -->
+      <section class="card flex min-h-0 flex-col p-4 lg:col-span-2">
         <div class="mb-3 flex shrink-0 items-center justify-between">
           <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
             <Icon name="cpu" :size="18" class="text-brand-300" />
@@ -330,17 +246,17 @@ async function revealPath(value: string) {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto pr-1">
+        <div class="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-center lg:gap-4">
           <input
             v-model="state.settings.javaPath"
-            class="field font-mono text-xs"
+            class="field min-w-0 font-mono text-xs lg:flex-1"
             placeholder="留空自动探测"
           />
-          <div class="mt-2.5 text-[11px] text-ink-400">
+          <div class="min-w-0 text-[11px] text-ink-400 lg:max-w-[45%] lg:shrink-0">
             <template v-if="state.java">
               当前：
               <span class="font-semibold text-emerald-400">Java {{ state.java.major }}</span>
-              <span class="text-ink-300">（{{ state.java.source }}）</span>
+              <span class="text-ink-400">（{{ state.java.source }}）</span>
               <div class="mt-0.5 truncate font-mono text-[10px] text-ink-300">
                 {{ state.java.path }}
               </div>
@@ -349,53 +265,52 @@ async function revealPath(value: string) {
           </div>
         </div>
       </section>
+
+      <!-- 关于与数据：版本号、数据目录、诊断入口都收进卡片，不再单独占一条底栏 -->
+      <section class="card flex flex-wrap items-center justify-between gap-3 p-4 lg:col-span-2">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
+            <Icon name="shield" :size="18" class="text-brand-300" />
+            关于与数据
+          </div>
+          <p class="mt-1 text-[11px] leading-relaxed text-ink-400">
+            MCL <span class="font-bold text-ink-900">{{ version }}</span>
+            <span class="mx-1.5 text-ink-300">·</span>Tauri 2 + Vue 3
+          </p>
+          <p class="mt-0.5 truncate font-mono text-[10px] text-ink-400" :title="state.paths.root">
+            {{ state.paths.root }}
+          </p>
+        </div>
+        <div class="flex shrink-0 flex-wrap items-center gap-2">
+          <button class="btn-ghost btn-sm" @click="copyPath(state.paths.root)">
+            <Icon name="copy" :size="13" />
+            复制数据目录
+          </button>
+          <button class="btn-ghost btn-sm" @click="revealPath(state.paths.root)">
+            <Icon name="folder" :size="13" />
+            打开
+          </button>
+          <button class="btn-outline btn-sm" :disabled="diagnosing" @click="runDiagnostics">
+            <Icon name="shield" :size="13" :class="diagnosing ? 'animate-pulse' : ''" />
+            {{ diagnosing ? "检测中…" : "一键环境检测" }}
+          </button>
+        </div>
+      </section>
     </div>
 
-    <!-- 保存 -->
+    <!-- 保存：只剩"保存"一件事，检测和目录都收进上面的「关于与数据」卡 -->
     <div
-      class="flex shrink-0 items-center justify-between rounded-card border border-line bg-surface/60 px-5 py-3"
+      class="flex shrink-0 items-center justify-between rounded-card border border-line bg-surface px-5 py-2.5"
     >
-      <p class="text-[11px] text-ink-400">
-        设置保存在 <span class="font-mono text-ink-500">{{ state.paths.root }}\settings.json</span>
+      <p class="truncate text-[11px] text-ink-400">
+        设置保存在 <span class="font-mono text-ink-500">settings.json</span>，改完点保存生效
       </p>
-      <div class="flex items-center gap-2">
-        <button class="btn-outline" :disabled="diagnosing" @click="runDiagnostics">
-          <Icon name="shield" :size="16" :class="diagnosing ? 'animate-pulse' : ''" />
-          {{ diagnosing ? "检测中…" : "一键环境检测" }}
-        </button>
-        <button class="btn-primary" @click="save">
-          <Icon name="check" :size="16" />
-          保存设置
-        </button>
-      </div>
+      <button class="btn-primary btn-sm shrink-0" @click="save">
+        <Icon name="check" :size="15" />
+        保存设置
+      </button>
     </div>
 
-    <!-- 关于：版本号 + 数据目录，反馈问题时方便报出来 -->
-    <section class="card flex shrink-0 flex-wrap items-center justify-between gap-3 px-5 py-2.5">
-      <div class="min-w-0 text-[11px] leading-relaxed text-ink-400">
-        <span class="font-bold text-ink-900">MCL {{ version }}</span>
-        <span class="mx-1.5 text-ink-300">·</span>
-        Tauri 2 + Vue 3
-        <span class="mx-1.5 text-ink-300">·</span>
-        <span class="font-mono text-[10px] text-ink-300" :title="state.paths.root">
-          {{ state.paths.root }}
-        </span>
-      </div>
-      <div class="flex shrink-0 items-center gap-2">
-        <button
-          class="text-[10px] font-semibold text-brand-300 hover:text-brand-200"
-          @click="copyPath(state.paths.root)"
-        >
-          复制数据目录
-        </button>
-        <button
-          class="text-[10px] font-semibold text-brand-300 hover:text-brand-200"
-          @click="revealPath(state.paths.root)"
-        >
-          打开
-        </button>
-      </div>
-    </section>
   </div>
 
   <div v-if="diagnosticOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" @click.self="diagnosticOpen = false">

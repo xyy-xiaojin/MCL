@@ -26,6 +26,36 @@ import type {
 
 const MAX_LOGS = 400;
 
+// —— 进度事件合并层 ——
+// id -> 最新进度（同 id 高频覆盖，只保留最新值）
+const progressBuffer = new Map<string, ProgressEvent>();
+let progressFlushScheduled = false;
+
+/** 把缓冲里的进度一次性写进响应式队列，然后清空。 */
+function flushProgressBuffer() {
+  progressFlushScheduled = false;
+  if (progressBuffer.size === 0) return;
+  for (const [id, payload] of progressBuffer) {
+    const item = queueItemById.get(id);
+    if (!item) continue;
+    item.done = payload.done;
+    if (payload.total > 0) item.total = payload.total;
+    item.state = "running";
+  }
+  progressBuffer.clear();
+}
+
+/** 每帧最多调度一次刷新；后台页面用 setTimeout 兜底。 */
+function scheduleProgressFlush() {
+  if (progressFlushScheduled) return;
+  progressFlushScheduled = true;
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(flushProgressBuffer);
+  } else {
+    setTimeout(flushProgressBuffer, 100);
+  }
+}
+
 export const state = reactive({
   view: "home" as ViewKey,
   /** 下载页当前分类。分类直接挂在一级导航里，所以状态提到全局。 */
@@ -39,7 +69,8 @@ export const state = reactive({
     gcMode: "auto",
     javaPath: "",
     username: "Player",
-    theme: "dark",
+    skinPath: "",
+    downloadConcurrency: 10,
   } as Settings,
   /** 后端算好的内存方案，进首页 / 改设置 / 换版本时刷新 */
   memory: null as MemoryView | null,
@@ -106,6 +137,87 @@ const queueItemById = new Map<string, QueueItem>();
 function rebuildQueueIndex() {
   queueItemById.clear();
   for (const item of state.queue) queueItemById.set(item.id, item);
+}
+
+// —— 队列快照合并层 ——
+//
+// 后端每次有文件状态变化就推一份完整快照，装原版时可能一秒几十次。
+// 直接 `state.queue = payload` 会让整个数组换掉：所有行重新 patch、
+// 依赖 queue 的 computed（分组、总计）全部重算，长列表直接卡。
+// 这里做两件事：100ms 节流 + 按 id 复用旧对象，只在字段真的变了时改属性。
+
+const QUEUE_FLUSH_MS = 100;
+let pendingQueue: QueueItem[] | null = null;
+let queueTimer: number | undefined;
+let lastQueueFlush = 0;
+
+function sameQueueOrder(a: QueueItem[], b: QueueItem[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/** 把新快照合并进现有数组：复用对象，避免整表重渲染。 */
+function mergeQueueSnapshot(next: QueueItem[]) {
+  const prev = new Map(state.queue.map((item) => [item.id, item]));
+  const merged = next.map((incoming) => {
+    const old = prev.get(incoming.id);
+    if (!old) return incoming;
+    if (old.state !== incoming.state) old.state = incoming.state;
+    if (old.done !== incoming.done) old.done = incoming.done;
+    if (old.total !== incoming.total) old.total = incoming.total;
+    if (old.error !== incoming.error) old.error = incoming.error;
+    if (old.label !== incoming.label) old.label = incoming.label;
+    if (old.groupId !== incoming.groupId) old.groupId = incoming.groupId;
+    return old;
+  });
+  // 顺序和长度都没变就不用替换数组：引用不变，下游 computed 少跑一轮
+  if (!sameQueueOrder(merged, state.queue)) state.queue = merged;
+  rebuildQueueIndex();
+}
+
+function flushQueue() {
+  queueTimer = undefined;
+  lastQueueFlush = Date.now();
+  const next = pendingQueue;
+  pendingQueue = null;
+  if (next) mergeQueueSnapshot(next);
+}
+
+/** 尾部节流：高频事件只保留最后一次快照，保证界面最终一致。 */
+function scheduleQueueFlush() {
+  if (queueTimer !== undefined) return;
+  const wait = Math.max(0, QUEUE_FLUSH_MS - (Date.now() - lastQueueFlush));
+  queueTimer = window.setTimeout(flushQueue, wait);
+}
+
+// —— 最近启动时间 ——
+// 只影响"版本列表按最近玩过排序/打标记"，属于界面偏好，放 localStorage 就够。
+const LAST_PLAY_KEY = "mcl-last-play";
+
+function loadLastPlayed(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LAST_PLAY_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** versionId -> 最近一次启动的 unix 毫秒 */
+export const lastPlayed = reactive<Record<string, number>>(loadLastPlayed());
+
+function markPlayed(id: string) {
+  if (!id) return;
+  lastPlayed[id] = Date.now();
+  try {
+    localStorage.setItem(LAST_PLAY_KEY, JSON.stringify(lastPlayed));
+  } catch {
+    // 隐私模式 / 禁用存储：只影响排序，不影响启动
+  }
 }
 
 let toastTimer: number | undefined;
@@ -208,7 +320,6 @@ export async function bootstrap() {
     "home",
     "versions",
     "downloads",
-    "modpacks",
     "mods",
     "netplay",
     "settings",
@@ -242,16 +353,16 @@ export async function bootstrap() {
     // 四个订阅并行注册：串行 await 会让首屏多等两个来回
     await Promise.all([
       listen<QueueItem[]>("queue://changed", (event) => {
-        state.queue = event.payload;
-        rebuildQueueIndex();
+        pendingQueue = event.payload;
+        scheduleQueueFlush();
       }),
-      // 单文件进度：只更新对应条目，不整表替换，避免列表抖动
+      // 单文件进度：先入缓冲，按帧合并刷新。
+      // 并发 10 文件时后端节流后仍有 ~50 事件/秒，逐条写响应式对象会把
+      // 下载页的分组 computed 打满；合并成每帧最多一次提交，重渲染降到 ~60fps
+      // 上限内且每帧只有一次。rAF 不可用（后台标签页）时退化为 100ms 定时。
       listen<ProgressEvent>("queue://progress", (event) => {
-        const item = queueItemById.get(event.payload.id);
-        if (!item) return;
-        item.done = event.payload.done;
-        if (event.payload.total > 0) item.total = event.payload.total;
-        item.state = "running";
+        progressBuffer.set(event.payload.id, event.payload);
+        scheduleProgressFlush();
       }),
       listen<{ stream: string; line: string }>("log://line", (event) => {
         pushLog({ ...event.payload, at: Date.now() });
@@ -333,10 +444,8 @@ export async function bootstrap() {
     if (!state.selectedVersion && state.local.length > 0) {
       state.selectedVersion = state.local[0].id;
     }
-    // 路径展示依赖选中的版本（隔离后 game 目录按版本走）
-    await refreshPaths();
-    // 内存方案依赖选中的版本（OptiFine 的基线不同），要在版本定下来之后再算
-    await refreshMemory();
+    // 目录和内存方案都依赖"选中的版本"，但两者互不依赖：并行发，少等一个来回
+    await Promise.all([refreshPaths(), refreshMemory()]);
 
     // 运行中的游戏列表：拉一次，之后每 5 秒跟一次
     // （游戏可能在启动器窗口之外被关掉，事件收不到的兜底）
@@ -524,6 +633,7 @@ export async function launchSelected() {
       line: `已启动 ${state.selectedVersion}，PID ${report.pid}（Java ${report.javaMajor}，${report.argCount} 个参数）`,
       at: Date.now(),
     });
+    markPlayed(state.selectedVersion);
     notify(`游戏已启动（PID ${report.pid}）`, "success");
     await refreshRunningGames();
   } catch (e) {

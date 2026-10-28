@@ -29,7 +29,7 @@ pub const EVENT_CHANGED: &str = "queue://changed";
 /// 单个大文件则靠 [`download`] 的分片并发。
 /// 默认 10 是个经验值：再高容易触发 BMCLAPI 的限流，反而更慢。
 /// 设置页可以调（见 [`Queue::set_concurrency`]），范围如下。
-const DEFAULT_CONCURRENT: u32 = 10;
+pub(crate) const DEFAULT_CONCURRENT: u32 = 10;
 const MIN_CONCURRENT: u32 = 1;
 const MAX_CONCURRENT: u32 = 32;
 
@@ -353,6 +353,15 @@ impl Queue {
 
     /// 取消：排队中的立刻取消；正在下载的会在当前文件结束后停止
     /// （HTTP 流已开始，强行中断会留下半截文件，反而更麻烦）。
+    /// 该任务是否已被请求取消。
+    #[must_use]
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        self.cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
+    }
+
     pub fn cancel(&self, id: &str) {
         {
             let mut cancel = self.cancel.lock().unwrap_or_else(|e| e.into_inner());
@@ -592,13 +601,20 @@ impl Queue {
         let mut urls = vec![entry.url.clone()];
         urls.extend(entry.fallbacks.iter().cloned());
 
-        let result = download::fetch_to_file(
+        // 取消探针：闭包查取消集合，chunk 循环里每包检查一次，
+        // 命中后临时文件由 fetch_to_file_stoppable 统一清理
+        let queue_for_stop = Arc::clone(self);
+        let entry_id = entry.id.clone();
+        let stop: download::StopFn = Arc::new(move || queue_for_stop.is_cancelled(&entry_id));
+
+        let result = download::fetch_to_file_stoppable(
             &self.client,
             &urls,
             &entry.dest,
             entry.sha1.as_deref(),
             entry.size,
             &on_progress,
+            &stop,
         )
         .await;
 

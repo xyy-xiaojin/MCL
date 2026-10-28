@@ -36,11 +36,15 @@ const tones: Record<string, string> = {
         );
       "
     />
+    <!--
+      用 scaleX 而不是 width：width 每帧触发布局重排，队列里几十条进度条同时
+      刷新会明显掉帧；transform 只走合成层。
+    -->
     <div
       v-else
-      class="h-full rounded-pill bg-gradient-to-r transition-[width] duration-300 ease-smooth"
+      class="h-full w-full origin-left rounded-pill bg-gradient-to-r transition-transform duration-300 ease-smooth will-change-transform"
       :class="tones[tone]"
-      :style="{ width: `${Math.min(100, Math.max(0, value * 100))}%` }"
+      :style="{ transform: `scaleX(${Math.min(1, Math.max(0, value))})` }"
     />
   </div>
 </template>

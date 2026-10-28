@@ -99,7 +99,7 @@ pub async fn repair_version(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<install::InstallReport> {
-    install::install(&state, &id).await
+    install::repair(&state, &id).await
 }
 
 /// 安装版本。下载进度通过 `queue://progress` 事件推送。
@@ -792,11 +792,14 @@ pub fn auth_status(state: State<'_, AppState>) -> auth::AuthStatusView {
 }
 
 /// 切换活跃账户。`index = null` 切回离线模式（离线不占列表位）。
-#[tauri::command(async)]
-pub fn auth_set_active(
+/// 必须持账户锁：启动的 token 续期是「读→网络→写回」长事务，
+/// 锁外切换会被续期写回覆盖，锁外登出则可能把切换整个回滚。
+#[tauri::command]
+pub async fn auth_set_active(
     state: State<'_, AppState>,
     index: Option<usize>,
 ) -> Result<auth::AuthStatusView> {
+    let _guard = state.account_lock.lock().await;
     let mut store = auth::AccountStore::load(&state.paths);
     match index {
         None => store.active = None,
@@ -932,26 +935,27 @@ pub async fn mod_diagnostics(
 fn detect_loader(version: &crate::engine::meta::VersionJson) -> (String, String) {
     for library in &version.libraries {
         let name = library.name.to_lowercase();
-        let version_part = library
-            .name
-            .split(':')
-            .nth(2)
-            .unwrap_or("")
-            .split('-')
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let raw_version = library.name.split(':').nth(2).unwrap_or("");
         if name.starts_with("net.fabricmc:fabric-loader") {
-            return ("fabric".into(), library.name.split(':').nth(2).unwrap_or("").to_string());
+            return ("fabric".into(), raw_version.to_string());
         }
         if name.starts_with("org.quiltmc:quilt-loader") {
-            return ("quilt".into(), library.name.split(':').nth(2).unwrap_or("").to_string());
+            return ("quilt".into(), raw_version.to_string());
         }
-        if name.starts_with("net.minecraftforge:forge") || name.starts_with("net.minecraftforge:fml") {
-            return ("forge".into(), version_part);
+        if name.starts_with("net.minecraftforge:fml") {
+            return ("forge".into(), raw_version.to_string());
+        }
+        if name.starts_with("net.minecraftforge:forge") {
+            // 坐标形如 net.minecraftforge:forge:1.20.1-47.2.0：'-' 前是 MC 版本、
+            // 后才是 Forge 版本，取反了会把 1.20.1 当 Forge 版本导致诊断全量误报
+            let forge_version = raw_version
+                .split_once('-')
+                .map(|(_, v)| v)
+                .unwrap_or(raw_version);
+            return ("forge".into(), forge_version.to_string());
         }
         if name.contains("neoforged") && (name.contains("loader") || name.contains("neoforge")) {
-            return ("neoforge".into(), version_part);
+            return ("neoforge".into(), raw_version.to_string());
         }
     }
     (String::new(), String::new())

@@ -137,7 +137,9 @@ impl AccountStore {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
 
-        // 迁移：0.03 时代是单账户 account.json
+        // 迁移：0.03 时代是单账户 account.json。
+        // 必须先确认新文件写成功、再动旧文件——顺序反了的话，
+        // save 失败（磁盘满）会把旧文件也弄丢，账户 token 就没了。
         if !std::fs::read(Self::file(paths))
             .map(|b| !b.is_empty())
             .unwrap_or(false)
@@ -146,22 +148,31 @@ impl AccountStore {
             if legacy.active() {
                 store.accounts = vec![legacy.clone()];
                 store.active = Some(0);
-                let _ = store.save(paths);
-                // 旧文件改名留档，不再被读
-                let _ = std::fs::rename(
-                    paths.root.join("account.json"),
-                    paths.root.join("account.json.migrated"),
-                );
+                if store.save(paths).is_ok() {
+                    let _ = std::fs::rename(
+                        paths.root.join("account.json"),
+                        paths.root.join("account.json.migrated"),
+                    );
+                } else {
+                    // 保存失败：保持旧文件原样，下次启动再试迁移
+                    store = AccountStore::default();
+                }
             }
         }
         store.repair();
         store
     }
 
+    /// 原子落盘：写临时文件再改名。直接覆盖写的话，进程中途被杀
+    /// 会留下半截 JSON，下次 load 解析失败当成空库、任何一次登录
+    /// 就把全部账户覆盖掉——token 全丢。
     pub fn save(&self, paths: &Paths) -> Result<()> {
         paths.ensure()?;
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(Self::file(paths), bytes)?;
+        let file = Self::file(paths);
+        let temp = paths.root.join("accounts.json.tmp");
+        std::fs::write(&temp, bytes)?;
+        std::fs::rename(&temp, &file)?;
         Ok(())
     }
 
@@ -184,24 +195,54 @@ impl AccountStore {
         }
     }
 
-    /// 插入或更新一个账户并设为活跃。同一账户（kind + 服务器 + 角色）只留一份。
-    /// 返回它在列表里的下标。
+    /// 插入或更新一个账户并设为活跃。同一账户（kind + 服务器 + 角色）只留一份；
+    /// 同站点的「多角色登录占位条目」（profile 为空、只有 token）一并清掉，
+    /// 否则每次多角色登录都会留一条永远完不成的死账户。
     pub fn upsert_active(&mut self, account: Account) -> usize {
-        let index = self
-            .accounts
-            .iter()
-            .position(|a| {
-                a.kind == account.kind
-                    && a.server_url == account.server_url
-                    && a.profile_id == account.profile_id
-            })
-            .unwrap_or_else(|| {
-                self.accounts.push(account.clone());
-                self.accounts.len() - 1
-            });
-        self.accounts[index] = account;
+        let mut kept: Vec<Account> = Vec::with_capacity(self.accounts.len() + 1);
+        for existing in self.accounts.drain(..) {
+            let same_site = existing.kind == account.kind
+                && existing.server_url == account.server_url;
+            let is_placeholder = same_site && existing.profile_id.is_empty();
+            let is_exact = same_site && existing.profile_id == account.profile_id;
+            if !is_placeholder && !is_exact {
+                kept.push(existing);
+            }
+        }
+        kept.push(account);
+        self.accounts = kept;
+        let index = self.accounts.len() - 1;
+        self.repair();
         self.active = Some(index);
         index
+    }
+
+    /// 多角色登录的收尾：找到「同站点、profile 还空着」的占位条目，
+    /// 把选好的角色写进去并设为活跃。找不到说明会话已变化（登录后被
+    /// 顶掉/登出），宁可报错也不能把角色写进别的账户。
+    pub fn complete_pending_profile(
+        &mut self,
+        profile_id: &str,
+        profile_name: &str,
+    ) -> Option<Account> {
+        // 优先修活跃条目（登录后它就是活跃的），其次列表里任意占位条目
+        let index = match self.active {
+            Some(i) if self
+                .accounts
+                .get(i)
+                .is_some_and(|a| a.kind == KIND_AUTHLIB && a.profile_id.is_empty()) =>
+            {
+                Some(i)
+            }
+            _ => self.accounts.iter().position(|a| {
+                a.kind == KIND_AUTHLIB && a.profile_id.is_empty() && !a.access_token.is_empty()
+            }),
+        }?;
+        let account = &mut self.accounts[index];
+        account.profile_id = profile_id.to_string();
+        account.profile_name = profile_name.to_string();
+        self.active = Some(index);
+        Some(account.clone())
     }
 
     /// 移除活跃账户，活跃自动落到列表剩余的最后一个（空了就是离线）。
@@ -500,7 +541,9 @@ pub async fn login(
     }
 }
 
-/// 多角色登录后的第二步：把选中的角色补进已保存的 token 会话里。
+/// 多角色登录后的第二步：把选中的角色补进「该站点还空着 profile」的
+/// 占位条目里。按占位条目定位而不是改活跃账户——登录和选角色之间
+/// 玩家可能切换了账户，改活跃的会把角色写进别人。
 pub async fn select_profile(
     state: &AppState,
     profile_id: &str,
@@ -508,21 +551,23 @@ pub async fn select_profile(
 ) -> Result<AccountView> {
     let _guard = state.account_lock.lock().await;
     let mut store = AccountStore::load(&state.paths);
-    let mut account = store.active_account();
-    if account.kind != KIND_AUTHLIB || account.access_token.is_empty() {
+    if !store.accounts.iter().any(|a| a.kind == KIND_AUTHLIB) {
         return Err(Error::msg("还没有登录皮肤站"));
     }
     if profile_id.trim().is_empty() {
         return Err(Error::msg("请先选择一个角色"));
     }
-    account.profile_id = crate::engine::skin::normalize_uuid(profile_id);
-    account.profile_name = profile_name.trim().to_string();
-    if account.profile_name.is_empty() {
+    let profile_id = crate::engine::skin::normalize_uuid(profile_id);
+    let profile_name = profile_name.trim().to_string();
+    if profile_name.is_empty() {
         return Err(Error::msg("角色名不能为空"));
     }
-    let index = store.upsert_active(account.clone());
+    let Some(account) = store.complete_pending_profile(&profile_id, &profile_name) else {
+        return Err(Error::msg(
+            "登录会话已变化（可能切换过账户或已登出），请重新登录再选角色",
+        ));
+    };
     store.save(&state.paths)?;
-    let _ = index;
     Ok(account.view())
 }
 

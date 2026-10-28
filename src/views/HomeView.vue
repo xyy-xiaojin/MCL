@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
 
 import Icon from "../components/Icon.vue";
 import SkinAvatar from "../components/SkinAvatar.vue";
@@ -8,6 +8,7 @@ import {
   downloadJavaRuntime,
   importSkinFile,
   killGame,
+  lastPlayed,
   launchSelected,
   notify,
   refreshAvatar,
@@ -33,6 +34,34 @@ const skinInput = ref<HTMLInputElement | null>(null);
 
 /** 头像是不是玩家自己导的 —— 决定要不要显示「恢复默认」和手臂切换 */
 const hasLocalSkin = computed(() => state.avatar.source === "local");
+
+/** 账户卡是否展开：默认收起成一行，一屏才能同时看到运行环境和版本列表 */
+const accountExpanded = ref(false);
+
+/** 快捷操作里"打开目录"：路径来自后端 paths，打开失败只提示不拦 */
+async function openPath(key: "game" | "versions" | "mods") {
+  const target = state.paths[key];
+  if (!target) return;
+  try {
+    await api.revealInExplorer(target);
+  } catch (e) {
+    notify(errorText(e), "error");
+  }
+}
+
+/** 版本轨道上的"最近玩过"：没玩过返回空串，不给界面添噪音 */
+function playedAgo(id: string): string {
+  const at = lastPlayed[id];
+  if (!at) return "";
+  const mins = Math.floor((Date.now() - at) / 60000);
+  if (mins < 1) return "刚刚玩过";
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return `${Math.floor(days / 30)} 个月前`;
+}
 
 const skinBadge = computed(() => {
   if (state.avatar.source === "local") return "本地皮肤";
@@ -198,6 +227,16 @@ onMounted(async () => {
   if (kind === "microsoft") accountTab.value = "ms";
 });
 
+// KeepAlive 回来后账户可能被「设置」页或后端续期改过，刷新一次 chips
+let firstActivate = true;
+onActivated(() => {
+  if (firstActivate) {
+    firstActivate = false;
+    return;
+  }
+  void refreshAuthStatus();
+});
+
 /** 当前活跃的登录账户（null = 离线模式） */
 const activeAccount = computed(() => {
   const status = auth.value;
@@ -218,9 +257,16 @@ const accountLabel = computed(() => {
 async function switchAccount(index: number | null) {
   if (busyAuth.value) return;
   busyAuth.value = true;
+  // 上一个账户的多角色待选列表不能再留着：那是对着"表单区"的，
+  // 切换后点它会去改别的账户的会话（后端会拦，但 UI 先不该给）
+  pendingProfiles.value = [];
   try {
     auth.value = await api.authSetActive(index);
-    const name = index === null ? "离线模式" : activeAccount.value?.profileName || "";
+    const active = activeAccount.value;
+    const name =
+      index === null
+        ? "离线模式"
+        : active?.profileName || active?.loginEmail || "未选角色的账户";
     notify(`已切换到 ${name}`, "info");
     await refreshAvatar();
     const kind = activeAccount.value?.kind;
@@ -279,6 +325,9 @@ async function authLogin() {
     }
   } catch (e) {
     notify(errorText(e), "error");
+    // 后端"无角色"分支是先落盘、再报 Err——账户其实已经进了列表，
+    // 不刷新的话 chips 和身份角标还停留在旧状态
+    await refreshAuthStatus();
   } finally {
     busyAuth.value = false;
   }
@@ -371,12 +420,21 @@ async function msPollLoop(device: MsDeviceCode, myLoop: number) {
       }
       return;
     } catch (e) {
+      const text = errorText(e);
+      // 终态错误（过期/拒绝）立刻终止，不再走瞬断重试白等三轮
+      if (text.includes("过期") || text.includes("拒绝")) {
+        if (myLoop === msLoopId) {
+          msDevice.value = null;
+          notify(text, "error");
+        }
+        return;
+      }
       // 网络瞬断不当场作废整个流程：连续 3 次失败才放弃（设备码通常还有效）
       netFails += 1;
       if (netFails >= 3) {
         if (myLoop === msLoopId) {
           msDevice.value = null;
-          notify(errorText(e), "error");
+          notify(text, "error");
         }
         return;
       }
@@ -396,16 +454,103 @@ function msCancel() {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col gap-4">
+  <div class="flex h-full min-h-0 gap-4">
+    <!--
+      左：版本轨道。原来"选版本"要跳去版本管理页，现在选版本和启动在同一屏，
+      管理/安装这类低频操作才跳页。
+    -->
+    <aside class="flex w-[248px] shrink-0 flex-col">
+      <div class="card flex min-h-0 flex-1 flex-col p-3">
+        <div class="mb-2 flex shrink-0 items-center justify-between px-1">
+          <span class="text-xs font-bold text-ink-900">
+            游戏版本
+            <span class="font-normal text-ink-400">({{ state.local.length }})</span>
+          </span>
+          <button
+            class="text-[11px] font-semibold text-brand-300 hover:text-brand-200"
+            @click="state.view = 'versions'"
+          >
+            管理
+          </button>
+        </div>
+
+        <div class="scroll-area min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+          <button
+            v-for="version in state.local"
+            :key="version.id"
+            class="relative w-full rounded-xl px-3 py-2 text-left transition-[background-color,transform] duration-200 ease-spring active:scale-[0.98]"
+            :class="
+              version.id === state.selectedVersion
+                ? 'bg-brand-500/[0.16]'
+                : 'hover:bg-veil/[0.05]'
+            "
+            @click="state.selectedVersion = version.id"
+          >
+            <span
+              class="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-pill bg-brand-600 transition-opacity duration-200"
+              :class="version.id === state.selectedVersion ? 'opacity-100' : 'opacity-0'"
+            />
+            <div class="flex items-center gap-1.5">
+              <span
+                class="min-w-0 flex-1 truncate text-xs font-bold"
+                :class="version.id === state.selectedVersion ? 'text-brand-200' : 'text-ink-900'"
+                :title="version.id"
+              >
+                {{ version.id }}
+              </span>
+              <span
+                v-if="state.runningGames.some((g) => g.version === version.id)"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 animate-pulse-soft"
+                title="这个版本正在运行"
+              />
+            </div>
+            <div class="mt-0.5 flex items-center gap-1 truncate text-[10px] text-ink-400">
+              <span>{{ version.complete ? version.kind : "未完成" }}</span>
+              <span class="text-ink-300">·</span>
+              <span>Java {{ version.javaMajor }}</span>
+              <template v-if="version.modCount > 0">
+                <span class="text-ink-300">·</span>
+                <span>{{ version.modCount }} mod</span>
+              </template>
+            </div>
+            <div v-if="playedAgo(version.id)" class="mt-0.5 truncate text-[10px] text-brand-300">
+              {{ playedAgo(version.id) }}
+            </div>
+          </button>
+
+          <div v-if="state.local.length === 0" class="px-2 py-8 text-center text-[11px] leading-relaxed text-ink-400">
+            还没有版本<br />点下面的「安装」开始
+          </div>
+        </div>
+
+        <div class="mt-2 flex shrink-0 gap-1.5">
+          <button class="btn-outline flex-1 btn-sm" @click="state.view = 'versions'">
+            <Icon name="download" :size="13" />
+            安装
+          </button>
+          <button
+            class="btn-ghost flex-1 btn-sm"
+            :disabled="!state.selectedVersion"
+            title="管理这个版本已安装的模组"
+            @click="state.view = 'mods'"
+          >
+            <Icon name="mods" :size="13" />
+            模组
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="flex min-w-0 flex-1 flex-col gap-4">
     <!-- 主启动卡：PCL2 的"启动"是页面上唯一的视觉焦点 -->
     <section
-      class="relative shrink-0 overflow-hidden rounded-card bg-gradient-to-br from-brand-600 via-brand-600 to-brand-800 p-6 text-white shadow-[0_24px_60px_-30px_rgba(76,29,149,0.9)]"
+      class="relative shrink-0 overflow-hidden rounded-card bg-gradient-to-br from-brand-600 via-brand-600 to-brand-800 p-5 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_24px_60px_-30px_rgba(76,29,149,0.9)] ring-1 ring-white/10"
     >
       <div
-        class="pointer-events-none absolute -right-16 -top-24 h-64 w-64 rounded-full bg-white/10 blur-2xl"
+        class="pointer-events-none absolute -right-16 -top-24 h-64 w-64 rounded-full bg-white/[0.12] blur-2xl"
       />
       <div
-        class="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-brand-300/20 blur-3xl"
+        class="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-brand-300/25 blur-3xl"
       />
 
       <div class="relative flex flex-wrap items-center justify-between gap-6">
@@ -418,13 +563,13 @@ function msCancel() {
             {{ state.selectedVersion || "尚未选择版本" }}
           </h2>
           <div class="mt-3 flex flex-wrap items-center gap-2 text-xs font-semibold">
-            <span class="rounded-pill bg-white/15 px-3 py-1">
+            <span class="rounded-pill bg-white/15 px-3 py-1 ring-1 ring-white/10">
               内存 {{ memoryLabel }}
             </span>
-            <span class="rounded-pill bg-white/15 px-3 py-1">
+            <span class="rounded-pill bg-white/15 px-3 py-1 ring-1 ring-white/10">
               {{ javaBadge }}
             </span>
-            <span class="rounded-pill bg-white/15 px-3 py-1">
+            <span class="rounded-pill bg-white/15 px-3 py-1 ring-1 ring-white/10">
               {{ state.local.length }} 个本地版本
             </span>
           </div>
@@ -433,24 +578,34 @@ function msCancel() {
         <div class="flex flex-col items-stretch gap-2">
           <!-- 游戏正在运行：启动位换成"结束游戏"，一眼能看清状态 -->
           <template v-if="runningGame">
-            <div class="rounded-xl bg-white/[0.12] px-4 py-2.5 text-center text-xs font-bold backdrop-blur-md">
+            <div class="rounded-xl bg-white/[0.14] px-4 py-2.5 text-center text-xs font-bold ring-1 ring-white/10">
               游戏运行中 · 已 {{ runningMinutes(runningGame.startedAtMs) }}
             </div>
             <button
-              class="btn min-w-[190px] border border-rose-300/40 bg-rose-500/25 px-8 py-4 text-base !text-white shadow-[0_16px_36px_-14px_rgba(0,0,0,0.55)] backdrop-blur-md hover:bg-rose-500/40 active:scale-[0.98]"
+              class="btn min-w-[196px] gap-2.5 rounded-2xl bg-rose-500/90 px-6 py-3.5 text-base font-extrabold !text-white shadow-[0_18px_40px_-14px_rgba(120,10,40,0.8)] hover:-translate-y-0.5 hover:bg-rose-500 active:translate-y-0"
               @click="killGame(state.selectedVersion)"
             >
-              <Icon name="close" :size="18" />
+              <span class="grid h-8 w-8 place-items-center rounded-full bg-white/20">
+                <Icon name="close" :size="15" />
+              </span>
               结束游戏
             </button>
           </template>
           <button
             v-else
-            class="btn min-w-[190px] border border-white/25 bg-white/[0.14] px-8 py-4 text-base !text-white shadow-[0_16px_36px_-14px_rgba(0,0,0,0.55)] backdrop-blur-md hover:bg-white/[0.22] active:scale-[0.98] disabled:opacity-60"
+            class="group/launch btn min-w-[196px] gap-2.5 rounded-2xl bg-white px-6 py-3.5 text-base font-extrabold text-brand-700 shadow-[0_18px_40px_-14px_rgba(23,10,60,0.75)] hover:-translate-y-0.5 hover:shadow-[0_22px_46px_-14px_rgba(23,10,60,0.8)] active:translate-y-0 disabled:!translate-y-0 disabled:opacity-60"
             :disabled="!canLaunch"
             @click="launchSelected"
           >
-            <Icon :name="state.launching ? 'refresh' : 'play'" :size="20" />
+            <span
+              class="grid h-8 w-8 place-items-center rounded-full bg-brand-600 text-white transition-transform duration-300 ease-spring group-hover/launch:scale-110"
+            >
+              <Icon
+                :name="state.launching ? 'refresh' : 'play'"
+                :size="15"
+                :class="state.launching ? 'animate-spin' : 'ml-0.5'"
+              />
+            </span>
             {{ state.launching ? "启动中…" : "启动游戏" }}
           </button>
         </div>
@@ -480,56 +635,33 @@ function msCancel() {
     </section>
 
     <!-- 下半部分：卡片网格自己滚，页面本身不动 -->
-    <div class="grid min-h-0 flex-1 content-start gap-4 overflow-y-auto pr-1 lg:grid-cols-2">
-      <!-- 版本选择 -->
-      <section class="card card-hover p-5">
-        <div class="mb-3 flex items-center justify-between">
-          <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
-            <Icon name="versions" :size="18" class="text-brand-300" />
-            游戏版本
-          </div>
-          <span class="text-[11px] text-ink-400">
-            {{ selected ? selected.kind : "—" }}
-          </span>
-        </div>
-
-        <select v-model="state.selectedVersion" class="field cursor-pointer">
-          <option v-if="state.local.length === 0" value="">暂无本地版本</option>
-          <option v-for="version in state.local" :key="version.id" :value="version.id">
-            {{ version.id }}
-          </option>
-        </select>
-
-        <p class="mt-2.5 text-[11px] leading-relaxed text-ink-400">
-          需要 <span class="font-semibold text-ink-500">Java {{ selected?.javaMajor ?? "?" }}</span>
-          · 目录 <span class="font-mono text-[10px] text-ink-300">{{ selected?.dir ?? "—" }}</span>
-        </p>
-      </section>
-
+    <div class="scroll-area flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
       <!-- 账户（离线 / 皮肤站）+ 皮肤 -->
       <!-- 注意：这卡绝不能带 overflow-hidden / min-h-0 —— 那会让网格把它的
-           最小高度按 0 参与，行高被旁边较矮的"游戏版本"卡拉平，内容被裁。
+           最小高度按 0 参与，行高被旁边较矮的「运行环境」卡拉平，内容被裁。
            行高必须由本卡内容撑起来；窗口太矮时由外层网格整体滚动。 -->
-      <section class="card card-hover flex flex-col p-5">
-        <div class="mb-4 flex shrink-0 items-center justify-between">
-          <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
-            <Icon name="home" :size="18" class="text-brand-300" />
-            账户
+      <section class="card card-hover flex flex-col p-4">
+        <!--
+          摘要行：默认只占一行（头像 + 谁 + 身份 + 皮肤来源）。
+          离线玩家 90% 的时间只需要看到这一行，表单点「切换 / 换肤」才展开，
+          省下来的高度留给下面的运行环境和版本列表。
+        -->
+        <div class="flex items-center gap-3">
+          <SkinAvatar :size="34" :model="state.avatar.model" :src="state.avatar.image ?? ''" />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-sm font-extrabold text-ink-900">
+              {{ activeAccount?.profileName || state.settings.username || "Player" }}
+            </div>
+            <div class="mt-0.5 truncate text-[10px] text-ink-400">
+              {{ accountLabel }} · {{ skinBadge }}
+            </div>
           </div>
-          <span
-            class="chip transition-colors"
-            :class="
-              authLoggedIn
-                ? 'bg-emerald-500/15 text-emerald-300'
-                : hasLocalSkin
-                  ? 'bg-brand-500/15 text-brand-200'
-                  : 'bg-surface-sunken text-ink-400'
-            "
-          >
-            {{ skinBadge }}
-          </span>
+          <button class="btn-ghost shrink-0 btn-sm" @click="accountExpanded = !accountExpanded">
+            {{ accountExpanded ? "收起" : "切换 / 换肤" }}
+          </button>
         </div>
 
+        <div v-if="accountExpanded" class="mt-3 flex min-h-0 flex-1 flex-col">
         <!-- 多账户切换：有登录账户时才出现；离线也是一格 -->
         <div
           v-if="auth && auth.accounts.length > 0"
@@ -540,7 +672,7 @@ function msCancel() {
             :class="
               auth.activeIndex === null || auth.activeIndex === undefined
                 ? 'bg-brand-600 text-white'
-                : 'bg-surface-sunken text-ink-500 hover:text-white'
+                : 'bg-surface-sunken text-ink-500 hover:text-ink-900'
             "
             :disabled="busyAuth"
             @click="switchAccount(null)"
@@ -555,7 +687,7 @@ function msCancel() {
             :class="
               auth.activeIndex === index
                 ? 'bg-brand-600 text-white'
-                : 'bg-surface-sunken text-ink-500 hover:text-white'
+                : 'bg-surface-sunken text-ink-500 hover:text-ink-900'
             "
             :title="
               account.kind === 'microsoft'
@@ -574,35 +706,35 @@ function msCancel() {
         </div>
 
         <!-- 模式切换 -->
-        <div class="mb-4 flex gap-2 rounded-xl bg-white/[0.04] p-1">
+        <div class="mb-4 flex gap-2 rounded-xl bg-veil/[0.04] p-1">
           <button
-            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-all"
+            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-[background-color,color,transform] duration-200 ease-spring active:scale-[0.97]"
             :class="
               accountTab === 'offline'
                 ? 'bg-brand-600 text-white shadow-[0_6px_18px_-8px_rgba(124,58,237,0.9)]'
-                : 'text-ink-500 hover:text-white'
+                : 'text-ink-500 hover:text-ink-900'
             "
             @click="accountTab = 'offline'"
           >
             离线模式
           </button>
           <button
-            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-all"
+            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-[background-color,color,transform] duration-200 ease-spring active:scale-[0.97]"
             :class="
               accountTab === 'authlib'
                 ? 'bg-brand-600 text-white shadow-[0_6px_18px_-8px_rgba(124,58,237,0.9)]'
-                : 'text-ink-500 hover:text-white'
+                : 'text-ink-500 hover:text-ink-900'
             "
             @click="accountTab = 'authlib'"
           >
             皮肤站登录
           </button>
           <button
-            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-all"
+            class="flex-1 rounded-lg py-1.5 text-xs font-bold transition-[background-color,color,transform] duration-200 ease-spring active:scale-[0.97]"
             :class="
               accountTab === 'ms'
                 ? 'bg-brand-600 text-white shadow-[0_6px_18px_-8px_rgba(124,58,237,0.9)]'
-                : 'text-ink-500 hover:text-white'
+                : 'text-ink-500 hover:text-ink-900'
             "
             @click="accountTab = 'ms'"
           >
@@ -621,7 +753,7 @@ function msCancel() {
               :src="state.avatar.image ?? ''"
             />
             <div class="min-w-0 flex-1">
-              <div class="truncate text-lg font-extrabold text-white">
+              <div class="truncate text-lg font-extrabold text-ink-900">
                 {{ activeAccount?.profileName }}
               </div>
               <div class="mt-0.5 text-[11px] text-ink-400">
@@ -689,7 +821,7 @@ function msCancel() {
               <button
                 v-for="profile in pendingProfiles"
                 :key="profile.id"
-                class="flex w-full items-center gap-2 rounded-xl border border-line bg-white/[0.02] px-3 py-2 text-left text-[13px] font-bold text-ink-900 transition hover:border-brand-500/50 hover:bg-brand-500/[0.12]"
+                class="flex w-full items-center gap-2 rounded-xl border border-line bg-veil/[0.02] px-3 py-2 text-left text-[13px] font-bold text-ink-900 transition hover:border-brand-500/50 hover:bg-brand-500/[0.12]"
                 :disabled="busyAuth"
                 @click="pickProfile(profile)"
               >
@@ -729,7 +861,7 @@ function msCancel() {
               :src="state.avatar.image ?? ''"
             />
             <div class="min-w-0 flex-1">
-              <div class="truncate text-lg font-extrabold text-white">
+              <div class="truncate text-lg font-extrabold text-ink-900">
                 {{ activeAccount?.profileName }}
               </div>
               <div class="mt-0.5 text-[11px] text-ink-400">
@@ -764,7 +896,7 @@ function msCancel() {
                 <div class="text-[10px] font-bold tracking-wider text-brand-300/80">
                   在浏览器里输入这个代码
                 </div>
-                <div class="mt-1 font-mono text-2xl font-black tracking-[0.3em] text-white">
+                <div class="mt-1 font-mono text-2xl font-black tracking-[0.3em] text-ink-900">
                   {{ msDevice.userCode }}
                 </div>
                 <div class="mt-1 truncate font-mono text-[10px] text-ink-400">
@@ -833,157 +965,181 @@ function msCancel() {
           />
         </template>
         </div>
+        </div>
       </section>
 
-      <!-- Java -->
-      <section class="card card-hover p-5">
-        <div class="mb-3 flex items-center justify-between">
+      <!--
+        运行环境：Java + 内存合成一张卡、左右两栏。
+        这两块内容都短，各占一张卡会留出大片空白；并排后一屏能同时看到
+        "缺不缺 Java / 给多少内存 / 用哪个版本"。
+      -->
+      <section class="card card-hover p-4">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
             <Icon name="cpu" :size="18" class="text-brand-300" />
-            Java 运行环境
+            运行环境
           </div>
-          <button
-            class="text-[11px] font-semibold text-brand-300 hover:text-brand-300"
-            @click="refreshJava(true)"
-          >
-            重新检测
-          </button>
-        </div>
-
-        <div v-if="state.java && !javaNeedsInstall" class="mb-3 rounded-xl bg-surface-sunken px-3.5 py-2.5">
-          <div class="flex items-center gap-2" :class="javaTone">
-            <span class="h-1.5 w-1.5 rounded-full bg-current" />
-            <span class="text-xs font-bold">Java {{ state.java.major }}</span>
-            <span class="text-[11px] font-medium text-ink-400">({{ state.java.source }})</span>
-          </div>
-          <div class="mt-1 truncate font-mono text-[10px] text-ink-400" :title="state.java.path">
-            {{ state.java.path }}
-          </div>
-        </div>
-        <div
-          v-else-if="javaNeedsInstall && state.java"
-          class="mb-3 rounded-xl bg-amber-500/[0.14] px-3.5 py-2.5 text-xs font-semibold text-amber-300"
-        >
-          当前是 Java {{ state.java.major }}，这个版本需要 Java {{ neededJavaMajor }}
-        </div>
-        <div
-          v-else-if="javaNeedsInstall"
-          class="mb-3 rounded-xl bg-amber-500/[0.14] px-3.5 py-2.5 text-xs font-semibold text-amber-300"
-        >
-          未检测到 Java{{ neededJavaMajor > 0 ? `，这个版本需要 Java ${neededJavaMajor}` : "" }}
-        </div>
-
-        <!-- 一键下载：没装 Java 的小白不用再去官网找安装包 -->
-        <button
-          v-if="javaNeedsInstall"
-          class="btn-primary mb-3 w-full"
-          :disabled="state.downloadingJava"
-          @click="downloadJavaRuntime(neededJavaMajor > 0 ? neededJavaMajor : 21)"
-        >
-          <Icon :name="state.downloadingJava ? 'refresh' : 'download'" :size="15" />
-          {{
-            state.downloadingJava
-              ? "下载中…（进度看顶栏队列）"
-              : `自动下载 Java ${neededJavaMajor > 0 ? neededJavaMajor : 21} 运行时`
-          }}
-        </button>
-
-        <input
-          v-model="state.settings.javaPath"
-          class="field font-mono text-xs"
-          placeholder="留空自动探测，例如 C:\\Program Files\\Java\\jdk-17\\bin\\java.exe"
-        />
-        <p class="mt-2 text-[10px] leading-relaxed text-ink-400">
-          下载的 Java 装在 MCL 的数据目录里，不写注册表、不污染系统；下载源用清华镜像，官方直连兜底。
-        </p>
-      </section>
-
-      <!-- 内存 -->
-      <section class="card card-hover p-5">
-        <div class="mb-3 flex items-center justify-between">
-          <div class="flex items-center gap-2 text-sm font-bold text-ink-900">
-            <Icon name="bolt" :size="18" class="text-brand-300" />
-            内存分配
-          </div>
-          <span class="chip bg-brand-500/[0.16] text-brand-200">{{ memoryLabel }}</span>
-        </div>
-
-        <!-- 自动模式：给一行结论 + 采纳按钮，不用玩家自己算 -->
-        <template v-if="autoRam">
-          <div class="rounded-xl bg-surface-sunken px-3.5 py-3">
-            <div class="flex items-baseline gap-2">
-              <span class="text-lg font-extrabold text-white">{{ recommendLabel }}</span>
-              <span class="text-[11px] font-semibold text-ink-400">建议值</span>
-            </div>
-            <p class="mt-1 text-[11px] leading-relaxed text-ink-400">
-              检测到 {{ state.memory?.plan.reason || "原版" }}，可用内存
-              {{ availableLabel }}
-            </p>
-          </div>
-
-          <button
-            class="btn-ghost mt-2.5 w-full !py-2 !text-xs"
-            title="改成手动指定内存"
-            @click="switchToManual"
-          >
-            手动指定内存
-          </button>
-        </template>
-
-        <!-- 手动模式：原来的滑块 -->
-        <template v-else>
-          <input
-            v-model.number="state.settings.maxMemoryMb"
-            type="range"
-            min="1024"
-            :max="sliderMax"
-            step="512"
-            class="w-full accent-brand-600"
-          />
-          <div class="mt-1 flex justify-between text-[10px] font-medium text-ink-300">
-            <span>1 GB</span>
-            <span>{{ Math.round(sliderMax / 2048) }} GB</span>
-            <span>{{ Math.round(sliderMax / 1024) }} GB</span>
-          </div>
-          <div class="mt-3 flex gap-2">
+          <div class="flex items-center gap-2">
+            <span v-if="!autoRam" class="chip bg-brand-500/[0.16] text-brand-200">
+              内存 {{ memoryLabel }}
+            </span>
             <button
-              v-for="preset in [2048, 4096, 8192]"
-              :key="preset"
-              class="flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors duration-200"
-              :class="
-                state.settings.maxMemoryMb === preset
-                  ? 'bg-brand-600 text-white'
-                  : 'bg-surface-sunken text-ink-500 hover:bg-white/[0.05] hover:text-brand-200'
-              "
-              @click="state.settings.maxMemoryMb = preset"
+              class="text-[11px] font-semibold text-brand-300 hover:text-brand-200"
+              @click="refreshJava(true)"
             >
-              {{ preset / 1024 }} GB
+              重新检测 Java
             </button>
           </div>
-          <button
-            class="mt-2 w-full text-[11px] font-semibold text-brand-300 hover:text-brand-200"
-            @click="switchToAuto"
-          >
-            改回自动推荐
-          </button>
-        </template>
+        </div>
 
-        <!-- 超限警告：物理内存不够时 VFS 会疯狂换页 -->
-        <p
-          v-if="overLimit"
-          class="mt-2.5 rounded-lg bg-rose-500/[0.14] px-3 py-2 text-[11px] font-semibold text-rose-300"
-        >
-          已超过物理内存的 70%（{{ safeLimitLabel }}），游戏容易被系统换页拖到卡死
-        </p>
+        <div class="grid gap-y-3 lg:grid-cols-2 lg:gap-x-5">
+          <!-- Java -->
+          <div class="min-w-0">
+            <div
+              v-if="state.java && !javaNeedsInstall"
+              class="mb-2 flex min-w-0 items-center gap-2"
+              :class="javaTone"
+            >
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+              <span class="shrink-0 text-xs font-bold">Java {{ state.java.major }}</span>
+              <span class="min-w-0 truncate text-[10px] font-medium text-ink-400" :title="state.java.path">
+                {{ state.java.source }} · {{ state.java.path }}
+              </span>
+            </div>
+            <div
+              v-else-if="javaNeedsInstall && state.java"
+              class="mb-2 rounded-lg bg-amber-500/[0.14] px-3 py-2 text-[11px] font-semibold text-amber-300"
+            >
+              当前 Java {{ state.java.major }}，这个版本需要 Java {{ neededJavaMajor }}
+            </div>
+            <div
+              v-else
+              class="mb-2 rounded-lg bg-amber-500/[0.14] px-3 py-2 text-[11px] font-semibold text-amber-300"
+            >
+              未检测到 Java{{ neededJavaMajor > 0 ? `，这个版本需要 Java ${neededJavaMajor}` : "" }}
+            </div>
 
-        <p v-else-if="state.memory?.gcArgs.length" class="mt-2.5 text-[10px] text-ink-400">
-          GC：{{ gcModeLabel }}
-        </p>
+            <div class="flex gap-2">
+              <input
+                v-model="state.settings.javaPath"
+                class="field min-w-0 flex-1 font-mono !text-[11px]"
+                placeholder="留空自动探测，可填 java.exe 路径"
+              />
+              <button
+                v-if="javaNeedsInstall"
+                class="btn-primary shrink-0 btn-sm"
+                :disabled="state.downloadingJava"
+                @click="downloadJavaRuntime(neededJavaMajor > 0 ? neededJavaMajor : 21)"
+              >
+                <Icon
+                  :name="state.downloadingJava ? 'refresh' : 'download'"
+                  :size="13"
+                  :class="state.downloadingJava ? 'animate-spin' : ''"
+                />
+                {{ state.downloadingJava ? "下载中…" : `装 Java ${neededJavaMajor > 0 ? neededJavaMajor : 21}` }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 内存 -->
+          <div class="min-w-0 border-t border-line pt-3.5 lg:border-l lg:border-t-0 lg:pl-5">
+            <template v-if="autoRam">
+              <div class="flex flex-wrap items-baseline gap-x-2">
+                <span class="text-lg font-extrabold text-ink-900">{{ recommendLabel }}</span>
+                <span class="text-[11px] font-semibold text-ink-400">建议值</span>
+                <span class="ml-auto text-[10px] text-ink-400">可用 {{ availableLabel }}</span>
+              </div>
+              <p class="mt-1 text-[11px] leading-relaxed text-ink-400">
+                按 {{ state.memory?.plan.reason || "原版" }} 与当前可用内存推算。
+              </p>
+              <button
+                class="mt-1.5 text-[11px] font-semibold text-brand-300 hover:text-brand-200"
+                title="改成手动指定内存"
+                @click="switchToManual"
+              >
+                手动指定内存 →
+              </button>
+            </template>
+
+            <template v-else>
+              <input
+                v-model.number="state.settings.maxMemoryMb"
+                type="range"
+                min="1024"
+                :max="sliderMax"
+                step="512"
+                class="w-full accent-brand-600"
+              />
+              <div class="mt-1 flex justify-between text-[10px] font-medium text-ink-400">
+                <span>1 GB</span>
+                <span>{{ Math.round(sliderMax / 2048) }} GB</span>
+                <span>{{ Math.round(sliderMax / 1024) }} GB</span>
+              </div>
+              <div class="mt-2 flex gap-2">
+                <button
+                  v-for="preset in [2048, 4096, 8192]"
+                  :key="preset"
+                  class="flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors duration-200"
+                  :class="
+                    state.settings.maxMemoryMb === preset
+                      ? 'bg-brand-600 text-white'
+                      : 'bg-surface-sunken text-ink-500 hover:bg-veil/[0.05] hover:text-brand-200'
+                  "
+                  @click="state.settings.maxMemoryMb = preset"
+                >
+                  {{ preset / 1024 }} GB
+                </button>
+              </div>
+              <button
+                class="mt-2 w-full text-[11px] font-semibold text-brand-300 hover:text-brand-200"
+                @click="switchToAuto"
+              >
+                改回自动推荐
+              </button>
+            </template>
+
+            <!-- 超限警告：物理内存不够时 VFS 会疯狂换页 -->
+            <p
+              v-if="overLimit"
+              class="mt-2 rounded-lg bg-rose-500/[0.14] px-3 py-2 text-[11px] font-semibold text-rose-300"
+            >
+              已超过物理内存的 70%（{{ safeLimitLabel }}），游戏容易被系统换页拖到卡死
+            </p>
+            <p v-else-if="state.memory?.gcArgs.length" class="mt-2 text-[10px] text-ink-400">
+              GC：{{ gcModeLabel }}
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 快捷操作：这些入口原来都埋在别的页面的二级菜单里，摆到首页一行 -->
+      <section class="card flex flex-wrap items-center gap-1.5 px-3 py-2">
+        <button class="btn-ghost btn-sm" @click="openPath('game')">
+          <Icon name="folder" :size="13" />
+          实例目录
+        </button>
+        <button class="btn-ghost btn-sm" @click="openPath('versions')">
+          <Icon name="versions" :size="13" />
+          版本目录
+        </button>
+        <button class="btn-ghost btn-sm" :disabled="!state.selectedVersion" @click="state.view = 'mods'">
+          <Icon name="mods" :size="13" />
+          模组
+        </button>
+        <button class="btn-ghost btn-sm" @click="state.view = 'netplay'">
+          <Icon name="netplay" :size="13" />
+          联机
+        </button>
+        <button class="btn-ghost btn-sm" @click="state.view = 'versions'">
+          <Icon name="download" :size="13" />
+          安装 / 备份
+        </button>
+        <span class="ml-auto truncate text-[10px] text-ink-400">
+          上次启动：{{ playedAgo(state.selectedVersion) || "还没启动过" }}
+        </span>
       </section>
     </div>
 
-    <p class="px-1 text-[11px] text-ink-300">
-      提示：启动前会自动保存上面的设置。所有下载、哈希校验与进程创建均由 Rust 后端完成。
-    </p>
+    </div>
   </div>
 </template>

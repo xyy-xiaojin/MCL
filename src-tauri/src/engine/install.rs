@@ -192,6 +192,76 @@ pub async fn install(state: &AppState, id: &str) -> Result<InstallReport> {
     })
 }
 
+/// 修复一个版本的文件：**用本地 version.json 跑计划，不重新拉远端清单**。
+///
+/// 与 `install` 的区别只在第一步——复制版/重命名版/Fabric/Forge 版的 id
+/// 在远端不存在，按 install 走必 404。健康文件（大小 + 哈希对上）会被
+/// 下载器跳过，所以实际只会补缺/坏的那部分；`game/` 完全不碰。
+pub async fn repair(state: &AppState, id: &str) -> Result<InstallReport> {
+    if !meta::is_safe_id(id) {
+        return Err(Error::msg(format!("版本 ID 不合法：{id}")));
+    }
+    let platform = Platform::current();
+    let source = state.source();
+
+    // 本地元数据（沿继承链合并，Fabric/Forge 薄壳也能修）
+    let (version, _chain) = meta::load_merged_with_chain(&state.paths.versions(), id)?;
+
+    let group_id = state.queue.alloc_group();
+    let group_label = format!("修复 {}", version.id);
+    let (mut tasks, natives) = plan(&version, state, &platform, &source)?;
+    for task in &mut tasks {
+        task.set_group(&group_id, &group_label);
+    }
+    let mut bytes: u64 = tasks.iter().filter_map(|t| t.size).sum();
+    let mut files = tasks.len();
+    let failures = enqueue_and_wait(state, tasks).await?;
+    if !failures.is_empty() {
+        return Err(Error::msg(format!(
+            "{} 个文件修复失败：{}",
+            failures.len(),
+            failures.join("；")
+        )));
+    }
+
+    // 资源对象与 natives 同 install
+    let legacy = 0usize;
+    if let Some(index) = load_asset_index(state, &version).await? {
+        let mut asset_tasks = asset_object_tasks(&index, state, &source);
+        bytes += asset_tasks.iter().filter_map(|t| t.size).sum::<u64>();
+        files += asset_tasks.len();
+        if !asset_tasks.is_empty() {
+            for task in &mut asset_tasks {
+                task.set_group(&group_id, &group_label);
+            }
+            let failed = enqueue_and_wait(state, asset_tasks).await?;
+            if !failed.is_empty() {
+                return Err(Error::msg(format!(
+                    "{} 个资源文件修复失败：{}",
+                    failed.len(),
+                    failed.join("；")
+                )));
+            }
+        }
+    }
+
+    {
+        let natives_dir = state.paths.natives_dir(&version.id);
+        let jars = natives.clone();
+        tokio::task::spawn_blocking(move || extract_natives(&jars, &natives_dir))
+            .await
+            .map_err(|e| Error::msg(format!("解压原生库失败：{e}")))??;
+    }
+
+    Ok(InstallReport {
+        version: version.id,
+        files,
+        bytes,
+        natives: natives.len(),
+        legacy,
+    })
+}
+
 /// 把任务入队并等它跑完，返回失败项（"标签：原因"）。
 async fn enqueue_and_wait(state: &AppState, tasks: Vec<NewTask>) -> Result<Vec<String>> {
     if tasks.is_empty() {
@@ -589,6 +659,8 @@ pub struct LocalVersion {
     pub size: u64,
     /// 实例私有游戏目录里有没有存档 —— 删之前必须让玩家知道
     pub has_saves: bool,
+    /// 实例 mods 目录里的模组数量（含被停用的 .disabled，方便一眼看出"这包多肥"）
+    pub mod_count: u32,
 }
 
 /// 递归统计目录大小。算不出来就返回 0，不影响功能。
@@ -647,12 +719,36 @@ pub fn delete(state: &AppState, id: &str) -> Result<DeleteReport> {
     if !dir.is_dir() {
         return Err(Error::msg(format!("版本 {id} 不存在")));
     }
+    // 游戏正在跑这个版本：jar/存档被锁，删除会中途失败留下残目录，
+    // 而且就算删成了，跑着的游戏写存档的目录没了——先让它退出
+    if state
+        .running_games
+        .lock()
+        .map(|games| games.iter().any(|g| g.version == id))
+        .unwrap_or(false)
+    {
+        return Err(Error::msg(format!(
+            "「{id}」正在运行，先到首页「结束游戏」再删除"
+        )));
+    }
 
-    // 有存档就先备一份（尽力而为：磁盘满/占用失败不拦删除）
-    let saves_backup = crate::engine::backup::create(&state.paths, id)
-        .ok()
-        .flatten()
-        .map(|info| info.file);
+    // 有存档就先备一份。备份失败时**拒绝删除**：静默删下去的话，
+    // 玩家以为有后悔药（提示里说了会自动备份），实际存档已经没了。
+    let has_saves = state
+        .paths
+        .saves(id)
+        .read_dir()
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    let saves_backup = match crate::engine::backup::create(&state.paths, id) {
+        Ok(info) => info.map(|i| i.file),
+        Err(err) if has_saves => {
+            return Err(Error::msg(format!(
+                "删除前的存档备份失败了（{err}），已中止删除。清理磁盘空间后重试，                 或到版本卡「备份」里确认能备份后再删"
+            )));
+        }
+        Err(_) => None,
+    };
 
     let mut removed = Vec::new();
     let mut freed = dir_size(&dir);
@@ -695,10 +791,18 @@ fn validate_new_id(state: &AppState, id: &str) -> Result<String> {
     if state.paths.version_dir(id).exists() {
         return Err(Error::msg(format!("已经有叫「{id}」的版本了，换一个名字")));
     }
+    // 以「占位目录创建成功」为唯一准入：检查和创建之间没有窗口，
+    // 两个并发的复制/重命名不会同时通过检查然后互踩同一个目录
+    std::fs::create_dir(state.paths.version_dir(id))
+        .map_err(|_| Error::msg(format!("已经有叫「{id}」的版本了，换一个名字")))?;
     Ok(id.to_string())
 }
 
 /// 递归复制目录。符号链接直接跳过（版本目录里不该有，防环）。
+pub(crate) fn copy_dir_all_pub(from: &Path, to: &Path) -> Result<()> {
+    copy_dir_all(from, to)
+}
+
 fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -728,7 +832,12 @@ pub fn copy(state: &AppState, src: &str, new_id: &str) -> Result<String> {
         return Err(Error::msg(format!("版本 {src} 不存在")));
     }
     let to = state.paths.version_dir(&new_id);
-    copy_dir_all(&from, &to)?;
+    // 拷贝中途失败（磁盘满/文件被占用）同样回滚——半拷贝的目录留在原地，
+    // 之后重试同一名字会被 validate_new_id 一直拒绝，玩家只能手动去删
+    if let Err(err) = copy_dir_all(&from, &to) {
+        let _ = std::fs::remove_dir_all(&to);
+        return Err(err);
+    }
     // json 的 id 字段与文件名要跟新 id 对上（失败则回滚整个副本，不留半成品）
     if let Err(err) = retarget_json_and_jar(&to, src, &new_id) {
         let _ = std::fs::remove_dir_all(&to);
@@ -806,6 +915,15 @@ fn describe(state: &AppState, root: &Path, dir: &Path) -> Option<LocalVersion> {
             && std::fs::read_dir(&saves)
                 .map(|d| d.flatten().next().is_some())
                 .unwrap_or(false),
+        // 只数文件，不算子目录：mods 下没有需要递归的场景
+        mod_count: std::fs::read_dir(state.paths.mods(&id))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_file())
+                    .count() as u32
+            })
+            .unwrap_or(0),
         id,
     })
 }

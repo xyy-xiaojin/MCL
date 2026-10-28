@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 
 import Icon from "../components/Icon.vue";
 import { api, errorText, humanSize } from "../api";
-import { importDropped, notify, state } from "../store";
+import { importDropped, notify, openDownload, state } from "../store";
 import type { ModEntry, ModIssue } from "../types";
 
 const mods = ref<ModEntry[]>([]);
@@ -40,8 +40,10 @@ async function load() {
   // 版本隔离后 mod 是按版本分的：没选版本就没有"这个版本的 mod 列表"可看
   if (!state.selectedVersion) {
     loadSeq++;
+    diagSeq++; // 在途的诊断响应也不许把已清空的横幅"复活"
     mods.value = [];
     issues.value = [];
+    loading.value = false;
     return;
   }
   const seq = ++loadSeq;
@@ -100,6 +102,17 @@ async function toggle(entry: ModEntry) {
 
 onMounted(load);
 
+// KeepAlive 之后再次进来：mods 目录可能被拖拽导入/外部程序改过，重新拉一次
+// （首次挂载时 onActivated 也会触发，跳过它，避免连拉两遍）
+let firstActivate = true;
+onActivated(() => {
+  if (firstActivate) {
+    firstActivate = false;
+    return;
+  }
+  void load();
+});
+
 // 拖拽导入会往 mods/ 里塞文件，列表要跟着刷新
 watch(
   () => state.modsVersion,
@@ -123,11 +136,11 @@ watch(
         </span>
       </div>
       <div class="flex items-center gap-2">
-        <button class="btn-primary !py-2 !text-xs" @click="addMods">
+        <button class="btn-primary btn-sm" @click="addMods">
           <Icon name="upload" :size="15" />
           添加 mod
         </button>
-        <button class="btn-ghost !py-2 !text-xs" :disabled="loading" @click="load">
+        <button class="btn-ghost btn-sm" :disabled="loading" @click="load">
           <Icon name="refresh" :size="15" :class="loading ? 'animate-spin' : ''" />
           刷新
         </button>
@@ -177,12 +190,21 @@ watch(
       </div>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto pr-1">
+    <div class="scroll-area min-h-0 flex-1 overflow-y-auto pr-1">
+    <div v-if="loading && mods.length === 0" class="grid gap-2.5 md:grid-cols-2">
+      <div v-for="i in 4" :key="`sk-${i}`" class="card flex items-center gap-3 p-4">
+        <div class="skeleton h-9 w-9 shrink-0 rounded-xl"></div>
+        <div class="flex-1 space-y-2">
+          <div class="skeleton h-4 w-1/2"></div>
+          <div class="skeleton h-3 w-1/4"></div>
+        </div>
+      </div>
+    </div>
     <div v-if="mods.length > 0" class="grid gap-2.5 md:grid-cols-2">
       <article
         v-for="entry in mods"
         :key="entry.fileName"
-        class="card card-hover flex items-center gap-3 p-4"
+        class="card card-hover flex items-center gap-3 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_72px]"
       >
         <div
           class="grid h-9 w-9 shrink-0 place-items-center rounded-xl transition-colors duration-200"
@@ -208,15 +230,15 @@ watch(
 
         <!-- 开关 -->
         <button
-          class="relative h-6 w-11 shrink-0 rounded-pill transition-colors duration-200"
+          class="relative h-6 w-11 shrink-0 rounded-pill transition-[background-color,transform] duration-200 active:scale-90"
           :class="entry.enabled ? 'bg-brand-600' : 'bg-ink-300/40'"
           :disabled="busy === entry.fileName"
           :title="entry.enabled ? '点击停用' : '点击启用'"
           @click="toggle(entry)"
         >
           <span
-            class="absolute top-0.5 h-5 w-5 rounded-full bg-surface shadow-sm transition-all duration-200 ease-smooth"
-            :class="entry.enabled ? 'left-[22px]' : 'left-0.5'"
+            class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-surface shadow-sm transition-transform duration-300 ease-spring"
+            :class="entry.enabled ? 'translate-x-5' : 'translate-x-0'"
           />
         </button>
       </article>
@@ -231,8 +253,8 @@ watch(
         导入整合包会自动把模组下载到对应实例；也可以手动把 .jar 放进上面的目录，
         点「刷新」就能看到。启用/停用只是改扩展名，不会删除文件。
       </p>
-      <button class="btn-outline" @click="state.view = 'modpacks'">
-        去整合包页
+      <button class="btn-outline" @click="openDownload('modpack')">
+        去下载整合包
         <Icon name="modpack" :size="16" />
       </button>
     </div>

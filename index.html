@@ -5,21 +5,68 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MCL</title>
     <!--
-      首屏防白闪：窗口背景和这里都是同一个深色，
-      JS/CSS 加载完成前不会先闪一下白底。
+      首屏防闪：窗口背景和这里保持同一个白底，
+      JS/CSS 加载完成前不会先闪一下别色。
     -->
     <style>
       html,
       body {
         margin: 0;
         height: 100%;
-        background: #0a0910;
-        color: #f4f1ff;
+        /* 和 style.css 里的 --surface-muted 一致 */
+        background: #f6f7fb;
+        color: #0f172a;
+      }
+      /* 启动画面：居中字标 + 呼吸光环，和主界面同一套配色 */
+      .mcl-splash {
+        display: flex;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+      .mcl-splash-mark {
+        font-size: 34px;
+        font-weight: 900;
+        letter-spacing: 0.28em;
+        text-indent: 0.28em;
+        color: #6d28d9;
+        animation: mcl-breathe 1.6s ease-in-out infinite;
+      }
+      .mcl-splash-ring {
+        position: absolute;
+        width: 84px;
+        height: 84px;
+        border-radius: 50%;
+        border: 2px solid transparent;
+        border-top-color: rgba(124, 58, 237, 0.85);
+        border-right-color: rgba(124, 58, 237, 0.25);
+        animation: mcl-spin 0.9s linear infinite;
+      }
+      @keyframes mcl-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes mcl-breathe {
+        0%,
+        100% {
+          opacity: 0.55;
+        }
+        50% {
+          opacity: 1;
+        }
       }
     </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- 启动画面：Vue 挂载后会被整个替换，纯 CSS 无依赖 -->
+      <div class="mcl-splash">
+        <div class="mcl-splash-mark">MCL</div>
+        <div class="mcl-splash-ring"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

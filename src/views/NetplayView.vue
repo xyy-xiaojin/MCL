@@ -300,7 +300,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
     case "error":
       return "bg-rose-400";
     default:
-      return "bg-white/20";
+      return "bg-veil/20";
   }
 };
 </script>
@@ -339,11 +339,11 @@ const dotClass = (s: NetplaySlot | undefined) => {
       <button
         v-for="item in tabs"
         :key="item.key"
-        class="group relative overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all duration-200 ease-smooth"
+        class="group relative overflow-hidden rounded-2xl border px-4 py-3 text-left transition-[background-color,border-color,box-shadow] duration-200 ease-smooth"
         :class="
           tab === item.key
             ? 'border-brand-500/45 bg-brand-500/[0.12]'
-            : 'border-line bg-surface hover:border-white/15 hover:bg-white/[0.04]'
+            : 'border-line bg-surface hover:border-veil/15 hover:bg-veil/[0.04]'
         "
         @click="tab = item.key"
       >
@@ -355,7 +355,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
           />
           <span
             class="text-[13px] font-extrabold"
-            :class="tab === item.key ? 'text-white' : 'text-ink-700'"
+            :class="tab === item.key ? 'text-ink-900' : 'text-ink-700'"
           >
             {{ item.label }}
           </span>
@@ -408,7 +408,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
             >
               <span
                 class="h-1.5 w-1.5 rounded-full"
-                :class="portOpen ? 'bg-emerald-400' : 'bg-white/20'"
+                :class="portOpen ? 'bg-emerald-400' : 'bg-veil/20'"
               />
               {{ portOpen ? `${localPort} 端口有人监听，可以开` : "这个端口现在没人监听" }}
             </span>
@@ -420,24 +420,24 @@ const dotClass = (s: NetplaySlot | undefined) => {
 
         <!-- EasyTier -->
         <div v-if="tab === 'easytier'" class="space-y-4">
-          <div class="flex gap-2 rounded-xl bg-white/[0.04] p-1">
+          <div class="flex gap-2 rounded-xl bg-veil/[0.04] p-1">
             <button
-              class="flex-1 rounded-lg py-2 text-xs font-bold transition-all"
+              class="flex-1 rounded-lg py-2 text-xs font-bold transition-colors"
               :class="
                 room.host
                   ? 'bg-brand-600 text-white shadow-[0_6px_18px_-8px_rgba(124,58,237,0.9)]'
-                  : 'text-ink-500 hover:text-white'
+                  : 'text-ink-500 hover:text-ink-900'
               "
               @click="room.host = true"
             >
               我开房间（房主）
             </button>
             <button
-              class="flex-1 rounded-lg py-2 text-xs font-bold transition-all"
+              class="flex-1 rounded-lg py-2 text-xs font-bold transition-colors"
               :class="
                 !room.host
                   ? 'bg-brand-600 text-white shadow-[0_6px_18px_-8px_rgba(124,58,237,0.9)]'
-                  : 'text-ink-500 hover:text-white'
+                  : 'text-ink-500 hover:text-ink-900'
               "
               @click="room.host = false"
             >
@@ -467,7 +467,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
             </div>
           </div>
 
-          <p class="rounded-xl bg-white/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
+          <p class="rounded-xl bg-veil/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
             <template v-if="room.host">
               房间建好后，把<span class="font-semibold text-ink-700">房间名 + 密码</span>发给朋友，
               他在游戏里填 <span class="font-mono text-brand-300">10.144.1.1:{{ localPort }}</span> 就能进。
@@ -504,7 +504,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
 
         <!-- 端口映射 -->
         <div v-else-if="tab === 'portmap'" class="space-y-4">
-          <label class="flex cursor-pointer items-start gap-3 rounded-xl bg-white/[0.03] px-3.5 py-3">
+          <label class="flex cursor-pointer items-start gap-3 rounded-xl bg-veil/[0.03] px-3.5 py-3">
             <input
               v-model="useUpnp"
               type="checkbox"
@@ -517,7 +517,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
             </span>
           </label>
 
-          <p class="rounded-xl bg-white/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
+          <p class="rounded-xl bg-veil/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
             开好之后会给你一个 <span class="font-mono text-brand-300">公网IP:端口</span>，
             朋友在游戏里「直接连接」填这个。你的网络如果是运营商级 NAT（对称型），这条路会失败，
             那就换 EasyTier 或樱花 FRP。
@@ -577,11 +577,11 @@ const dotClass = (s: NetplaySlot | undefined) => {
               <button
                 v-for="t in tunnels"
                 :key="t.id"
-                class="flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left transition-all"
+                class="flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left transition-colors"
                 :class="
                   pickedTunnel === t.id
                     ? 'border-brand-500/50 bg-brand-500/[0.12]'
-                    : 'border-line bg-white/[0.02] hover:border-white/15'
+                    : 'border-line bg-veil/[0.02] hover:border-veil/15'
                 "
                 :disabled="t.banned || running"
                 @click="pickedTunnel = t.id"
@@ -610,13 +610,13 @@ const dotClass = (s: NetplaySlot | undefined) => {
                 </div>
               </button>
             </div>
-            <p v-else class="rounded-xl bg-white/[0.03] px-3.5 py-3 text-[11px] text-ink-400">
+            <p v-else class="rounded-xl bg-veil/[0.03] px-3.5 py-3 text-[11px] text-ink-400">
               账号下还没有隧道。去樱花面板「服务 → 隧道列表」建一条
               <span class="font-semibold">TCP</span> 隧道再回来。
             </p>
           </div>
 
-          <p class="rounded-xl bg-white/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
+          <p class="rounded-xl bg-veil/[0.03] px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-400">
             隧道连通后，把右边显示的地址发给朋友。流量走樱花节点，
             免费节点有带宽上限，人多会卡。
           </p>
@@ -657,11 +657,11 @@ const dotClass = (s: NetplaySlot | undefined) => {
             发给朋友的地址
           </div>
           <div class="mt-1 flex items-center gap-2">
-            <code class="min-w-0 flex-1 truncate font-mono text-[15px] font-bold text-white">
+            <code class="min-w-0 flex-1 truncate font-mono text-[15px] font-bold text-ink-900">
               {{ slot.address }}
             </code>
             <button
-              class="rounded-lg bg-white/10 p-1.5 text-ink-700 transition hover:bg-white/20 hover:text-white"
+              class="rounded-lg bg-veil/10 p-1.5 text-ink-700 transition hover:bg-veil/20 hover:text-ink-900"
               title="复制"
               @click="copy(slot.address)"
             >
@@ -675,7 +675,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
           <div
             v-for="fact in slot.facts"
             :key="fact.label"
-            class="flex items-start justify-between gap-3 border-b border-white/[0.04] pb-1.5 last:border-0 last:pb-0"
+            class="flex items-start justify-between gap-3 border-b border-veil/[0.04] pb-1.5 last:border-0 last:pb-0"
           >
             <dt class="shrink-0 text-[11px] font-semibold text-ink-400">
               {{ fact.label }}
@@ -723,7 +723,7 @@ const dotClass = (s: NetplaySlot | undefined) => {
         </button>
       </div>
       <div
-        class="max-h-56 overflow-y-auto rounded-xl bg-black/35 p-3 font-mono text-[11px] leading-[1.65] text-ink-500"
+        class="max-h-56 overflow-y-auto rounded-xl bg-surface-sunken p-3 font-mono text-[11px] leading-[1.65] text-ink-500"
       >
         <div v-if="!logs[tab].length" class="text-ink-300">
           启动后这里会显示输出的每一行，连不上时先看它。

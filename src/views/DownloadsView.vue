@@ -22,6 +22,7 @@ import {
   clearFinishedQueue,
   clearLogs,
   notify,
+  openDownload,
   refreshLocal,
   refreshRemote,
   state,
@@ -41,6 +42,16 @@ const meta: Record<string, { label: string; icon: string; hint: string }> = {
 
 const section = computed(() => state.downloadSection);
 const current = computed(() => meta[section.value] ?? meta.vanilla);
+
+/** 分类做成页内 tab：侧栏不再重复挂 6 个入口，宽度给内容 */
+const sectionTabs = [
+  { key: "vanilla", label: "原版游戏" },
+  { key: "mod", label: "Mod" },
+  { key: "modpack", label: "整合包" },
+  { key: "datapack", label: "数据包" },
+  { key: "resourcepack", label: "材质包" },
+  { key: "shader", label: "光影包" },
+] as const;
 
 // ---- 原版游戏 ----
 
@@ -441,7 +452,7 @@ async function retryFailed(id: string) {
 async function cancelGroup(groupId: string, count: number) {
   try {
     await api.queueCancelGroup(groupId);
-    notify(`已请求取消这组下载（${count} 个文件）；正在下载的文件会在当前文件结束后停止`, "info");
+    notify(`已取消这组下载（${count} 个文件）`, "info");
   } catch (e) {
     notify(errorText(e), "error");
   }
@@ -459,7 +470,7 @@ async function cancelAll() {
   const running = pending.filter((q) => q.state === "running").length;
   notify(
     running > 0
-      ? `已取消 ${pending.length} 个任务，其中 ${running} 个正在下载的会在当前文件结束后停止`
+      ? `已取消 ${pending.length} 个任务`
       : `已取消 ${pending.length} 个任务`,
     "info",
   );
@@ -477,27 +488,37 @@ onMounted(async () => {
     这样滚动页面时筛选条件不会被推走，列表区域也不会撑出窗口外的滚动条。
   -->
   <div class="flex h-full min-h-0 flex-col gap-2">
-    <!-- 页头：分类 + 队列，压成一行，把纵向空间留给列表 -->
-    <header class="flex shrink-0 items-center gap-3">
-      <div class="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-brand-500/[0.16] text-brand-200">
-        <Icon :name="current.icon" :size="16" />
-      </div>
-      <div class="flex min-w-0 items-baseline gap-2">
-        <h2 class="shrink-0 text-[15px] font-extrabold tracking-tight text-ink-900">
-          {{ current.label }}
-        </h2>
-        <span
-          v-if="isHot && section !== 'vanilla'"
-          class="chip shrink-0 bg-amber-500/[0.14] text-amber-300"
+    <!-- 页头：分类 tab + 队列，压成一行，把纵向空间留给列表 -->
+    <header class="flex shrink-0 flex-wrap items-center gap-2">
+      <div class="flex shrink-0 items-center gap-0.5 rounded-xl bg-surface-sunken p-1">
+        <button
+          v-for="tab in sectionTabs"
+          :key="tab.key"
+          class="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition-[background-color,color,transform] duration-200 ease-spring active:scale-[0.96]"
+          :class="
+            section === tab.key
+              ? 'bg-surface text-brand-200 shadow-sm'
+              : 'text-ink-500 hover:text-ink-900'
+          "
+          @click="openDownload(tab.key)"
         >
-          <Icon name="flame" :size="11" filled />
-          热门
-        </span>
-        <p class="truncate text-[11px] text-ink-400">{{ current.hint }}</p>
+          {{ tab.label }}
+        </button>
       </div>
 
+      <span
+        v-if="isHot && section !== 'vanilla'"
+        class="chip shrink-0 bg-amber-500/[0.14] text-amber-300"
+      >
+        <Icon name="flame" :size="11" filled />
+        热门
+      </span>
+      <p class="hidden min-w-0 flex-1 truncate text-[11px] text-ink-400 xl:block">
+        {{ current.hint }}
+      </p>
+
       <button
-        class="ml-auto flex shrink-0 items-center gap-1.5 rounded-pill border border-line bg-white/[0.04] px-3 py-1.5 text-[11px] font-semibold text-ink-500 transition-colors hover:bg-white/[0.08] hover:text-ink-700"
+        class="ml-auto flex shrink-0 items-center gap-1.5 rounded-pill border border-line bg-veil/[0.04] px-3 py-1.5 text-[11px] font-semibold text-ink-500 transition-colors hover:bg-veil/[0.08] hover:text-ink-700"
         @click="queueOpen = !queueOpen"
       >
         <Icon name="download" :size="13" />
@@ -542,7 +563,7 @@ onMounted(async () => {
               placeholder="过滤版本号，如 1.20"
             />
           </div>
-          <button class="btn-ghost !py-2 !text-xs" @click="refreshRemote">
+          <button class="btn-ghost btn-sm" @click="refreshRemote">
             <Icon name="refresh" :size="14" />
             刷新清单
           </button>
@@ -562,7 +583,7 @@ onMounted(async () => {
         <p class="mt-1 text-xs text-ink-400">如果一直停在这里，检查下载源或网络。</p>
       </div>
 
-      <div v-else class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[1.55fr_1fr]">
+      <div v-else class="grid min-h-0 flex-1 items-start gap-3 lg:grid-cols-[1.55fr_1fr]">
         <!-- 左：正式版（版本多，给更宽的一栏） -->
         <section v-if="releaseList.length" class="card flex min-h-0 flex-col overflow-hidden">
           <div
@@ -574,12 +595,12 @@ onMounted(async () => {
             <span class="font-normal text-ink-300">点版本号选游戏类型（原版 / Fabric / Forge…）</span>
           </div>
           <div
-            class="grid min-h-0 flex-1 grid-cols-2 content-start gap-1 overflow-y-auto p-2 md:grid-cols-3"
+            class="grid min-h-0 max-h-[calc(100vh-21rem)] grid-cols-2 content-start gap-1 overflow-y-auto p-2 md:grid-cols-3"
           >
             <button
               v-for="v in releaseList"
               :key="v.id"
-              class="group flex items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-white/[0.05] disabled:opacity-60 [content-visibility:auto] [contain-intrinsic-size:auto_38px]"
+              class="group flex items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-veil/[0.05] disabled:opacity-60 [content-visibility:auto] [contain-intrinsic-size:auto_38px]"
               :disabled="installing === v.id || Boolean(pickerBusy)"
               @click="openPicker(v.id)"
             >
@@ -606,7 +627,7 @@ onMounted(async () => {
         </section>
 
         <!-- 右：快照 -->
-        <section v-if="snapshotList.length" class="card flex min-h-0 flex-col overflow-hidden">
+        <section v-if="snapshotList.length" class="card flex min-h-0 max-h-full flex-col self-start overflow-hidden">
           <div
             class="flex shrink-0 items-center justify-between border-b border-line px-4 py-2.5 text-xs font-bold text-ink-500"
           >
@@ -616,12 +637,12 @@ onMounted(async () => {
             <span class="font-normal text-ink-300">周末版本，可能不稳</span>
           </div>
           <div
-            class="grid min-h-0 flex-1 grid-cols-1 content-start gap-1 overflow-y-auto p-2 md:grid-cols-2"
+            class="grid min-h-0 max-h-[calc(100vh-21rem)] grid-cols-1 content-start gap-1 overflow-y-auto p-2 md:grid-cols-2"
           >
             <button
               v-for="v in snapshotList"
               :key="v.id"
-              class="flex items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-white/[0.05] disabled:opacity-60 [content-visibility:auto] [contain-intrinsic-size:auto_38px]"
+              class="flex items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-veil/[0.05] disabled:opacity-60 [content-visibility:auto] [contain-intrinsic-size:auto_38px]"
               :disabled="installing === v.id || Boolean(pickerBusy)"
               @click="openPicker(v.id)"
             >
@@ -709,7 +730,7 @@ onMounted(async () => {
             <button
               v-for="opt in sortOptions"
               :key="opt.value"
-              class="rounded-pill px-2.5 py-1 text-[11px] font-semibold transition-colors"
+              class="rounded-pill px-2.5 py-1 text-[11px] font-semibold transition-[background-color,color,transform] duration-200 ease-spring active:scale-[0.95]"
               :class="
                 sort === opt.value
                   ? 'bg-surface text-brand-200 shadow-sm'
@@ -723,28 +744,37 @@ onMounted(async () => {
         </div>
 
         <!-- 滚动到底部附近会自动续下一页，不再放「加载更多」按钮 -->
-        <div class="min-h-0 flex-1 overflow-y-auto" @scroll.passive="onListScroll">
+        <div class="scroll-area min-h-0 flex-1 overflow-y-auto" @scroll.passive="onListScroll">
           <div v-if="loadError" class="px-4 py-12 text-center">
             <p class="text-xs font-semibold text-rose-300">{{ loadError }}</p>
-            <button class="btn-outline mt-3 !py-2 !text-xs" @click="load(true)">重试</button>
+            <button class="btn-outline mt-3 btn-sm" @click="load(true)">重试</button>
           </div>
 
           <div
             v-else-if="loading && hits.length === 0"
-            class="px-4 py-16 text-center text-xs text-ink-400"
+            class="space-y-3 px-1 py-4"
           >
-            正在拉取 {{ current.label }}…
+            <div class="text-center text-xs text-ink-400">
+              正在拉取 {{ current.label }}…
+            </div>
+            <div v-for="i in 4" :key="`sk-${i}`" class="card flex gap-3 p-3">
+              <div class="skeleton h-12 w-12 shrink-0 rounded-xl"></div>
+              <div class="flex-1 space-y-2">
+                <div class="skeleton h-4 w-2/3"></div>
+                <div class="skeleton h-3 w-1/3"></div>
+              </div>
+            </div>
           </div>
 
           <div v-else-if="hits.length === 0" class="px-4 py-16 text-center text-xs text-ink-400">
             没有匹配的项目，换个关键词或放宽筛选条件。
           </div>
 
-          <div v-else class="divide-y divide-line/80">
+          <div v-else class="divide-y divide-line">
             <article
               v-for="hit in hits"
               :key="hit.id"
-              class="flex gap-3.5 px-5 py-3 transition-colors hover:bg-white/[0.04]"
+              class="flex gap-3.5 px-5 py-3 transition-colors hover:bg-veil/[0.04]"
             >
               <img
                 v-if="hit.iconUrl"
@@ -847,7 +877,7 @@ onMounted(async () => {
             <button
               v-for="choice in pickerChoices"
               :key="choice.id"
-              class="flex items-center gap-3 rounded-xl border border-line bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:bg-white/[0.06] disabled:opacity-50"
+              class="flex items-center gap-3 rounded-xl border border-line bg-veil/[0.02] px-3.5 py-2.5 text-left transition-colors hover:bg-veil/[0.06] disabled:opacity-50"
               :disabled="Boolean(pickerBusy) || Boolean(installing)"
               @click="choosePicker(choice.id)"
             >
@@ -923,11 +953,11 @@ onMounted(async () => {
           <section
             v-for="group in visibleGroups"
             :key="group.id"
-            class="border-b border-line/70"
+            class="border-b border-line"
           >
             <div class="flex items-center gap-2 px-4 py-3">
               <button
-                class="grid h-6 w-6 shrink-0 place-items-center rounded-lg text-ink-400 hover:bg-white/[0.06] hover:text-ink-700"
+                class="grid h-6 w-6 shrink-0 place-items-center rounded-lg text-ink-400 hover:bg-veil/[0.06] hover:text-ink-700"
                 :aria-label="expandedGroups.has(group.id) ? '收起明细' : '展开明细'"
                 @click="toggleGroup(group.id)"
               >
@@ -963,11 +993,11 @@ onMounted(async () => {
                 :tone="group.failedCount ? 'danger' : groupPercent(group) >= 1 ? 'success' : 'brand'"
               />
             </div>
-            <div v-if="expandedGroups.has(group.id)" class="border-t border-line/50 bg-black/[0.08]">
+            <div v-if="expandedGroups.has(group.id)" class="border-t border-line bg-veil/[0.03]">
               <div
                 v-for="item in group.detailItems"
                 :key="item.id"
-                class="border-b border-line/40 px-5 py-2"
+                class="border-b border-line px-5 py-2"
               >
                 <div class="flex items-center gap-2">
                   <span class="chip shrink-0 !px-1.5 !py-0.5 bg-surface-sunken text-ink-500">{{ kindLabel[item.kind] ?? item.kind }}</span>
@@ -1010,7 +1040,7 @@ onMounted(async () => {
         </div>
 
         <div
-          class="max-h-[120px] shrink-0 overflow-y-auto bg-black/50 px-3 py-2 font-mono text-[10px] leading-relaxed"
+          class="max-h-[120px] shrink-0 overflow-y-auto bg-surface-sunken px-3 py-2 font-mono text-[10px] leading-relaxed"
         >
           <div v-if="state.logs.length === 0" class="text-ink-500">
             // 启动游戏后的日志会出现在这里

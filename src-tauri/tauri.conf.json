@@ -19,8 +19,8 @@
         "minHeight": 640,
         "center": true,
         "resizable": true,
-        "theme": "Dark",
-        "backgroundColor": "#0a0910",
+        "theme": "Light",
+        "backgroundColor": "#f6f7fb",
         "additionalBrowserArgs": "--disable-gpu-sandbox --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       }
     ],

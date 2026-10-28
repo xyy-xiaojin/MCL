@@ -173,7 +173,6 @@ pub struct Settings {
     /// 留空表示自动探测。
     pub java_path: String,
     pub username: String,
-    pub theme: String,
     /// 同时下载的文件数（设置页可调，1–32）。默认 10：再高容易被镜像限流。
     pub download_concurrency: u32,
     /// 玩家导入的离线皮肤（PNG 绝对路径）。空串表示用内置的 Steve。
@@ -193,8 +192,7 @@ impl Default for Settings {
             gc_mode: "auto".to_string(),
             java_path: String::new(),
             username: "Player".to_string(),
-            theme: "dark".to_string(),
-            download_concurrency: 10,
+            download_concurrency: crate::engine::queue::DEFAULT_CONCURRENT,
             skin_path: String::new(),
         }
     }

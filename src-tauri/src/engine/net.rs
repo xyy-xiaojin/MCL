@@ -130,6 +130,8 @@ pub enum FailureKind {
     Missing,
     /// 内容不对（长度不够、哈希不符）
     Corrupt,
+    /// 用户主动取消——立即停止，不重试不换源
+    Cancelled,
 }
 
 impl FailureKind {

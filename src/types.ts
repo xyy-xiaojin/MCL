@@ -5,7 +5,6 @@ export type ViewKey =
   | "versions"
   | "netplay"
   | "downloads"
-  | "modpacks"
   | "mods"
   | "settings";
 
@@ -21,7 +20,6 @@ export interface Settings {
   /** 留空表示自动探测 */
   javaPath: string;
   username: string;
-  theme: string;
   /** 同时下载的文件数（1–32，默认 10） */
   downloadConcurrency: number;
   /** 导入的离线皮肤 PNG 路径，空串表示用内置 Steve */
@@ -57,6 +55,8 @@ export interface LocalVersion {
   size: number;
   /** 这个版本的私有存档目录里有没有东西——删之前要警告 */
   hasSaves: boolean;
+  /** 实例 mods 目录里的模组数量（含停用的） */
+  modCount: number;
 }
 
 export interface DeleteReport {

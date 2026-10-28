@@ -209,8 +209,8 @@ export const browserMock: Record<string, (args?: any) => unknown> = {
     gcMode: "auto",
     javaPath: "",
     username: "Player",
-    theme: "dark",
     skinPath: "",
+    downloadConcurrency: 10,
   }),
   memory_plan: (args) => {
     const mods = 187;
@@ -280,6 +280,7 @@ export const browserMock: Record<string, (args?: any) => unknown> = {
       complete: true,
       size: 412_356_608,
       hasSaves: true,
+      modCount: 187,
     },
     {
       id: "1.21.4",
@@ -289,6 +290,7 @@ export const browserMock: Record<string, (args?: any) => unknown> = {
       complete: true,
       size: 268_435_456,
       hasSaves: true,
+      modCount: 187,
     },
     {
       id: "1.20.1",
@@ -298,6 +300,7 @@ export const browserMock: Record<string, (args?: any) => unknown> = {
       complete: true,
       size: 201_326_592,
       hasSaves: false,
+      modCount: 0,
     },
   ],
   delete_version: (args) => ({

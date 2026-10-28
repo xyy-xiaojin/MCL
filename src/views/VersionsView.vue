@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 
 import Icon from "../components/Icon.vue";
 import { LOADER_LABEL } from "../labels";
@@ -67,6 +67,9 @@ async function remove(version: LocalVersion) {
     deleting.value = "";
   }
 }
+
+const releaseVersions = computed(() => state.remote.filter((v) => v.kind === "release"));
+const nonReleaseVersions = computed(() => state.remote.filter((v) => v.kind !== "release"));
 
 const filtered = computed(() => {
   const query = filter.value.trim().toLowerCase();
@@ -243,6 +246,16 @@ function toggleMenu(id: string) {
   menuOpen.value = menuOpen.value === id ? "" : id;
 }
 
+// 点到菜单以外的地方就收起（点开菜单后点页面任何空白都该关掉）
+function onDocumentClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("[data-ver-menu]")) {
+    menuOpen.value = "";
+  }
+}
+onMounted(() => document.addEventListener("click", onDocumentClick));
+onUnmounted(() => document.removeEventListener("click", onDocumentClick));
+
 /** 复制/重命名共用的小输入弹层 */
 const idEditor = ref<{
   version: LocalVersion;
@@ -271,6 +284,7 @@ async function repairVersion(version: LocalVersion) {
   );
   if (!ok) return;
   repairing.value = version.id;
+  notify(`正在校验「${version.id}」的游戏文件…`, "info");
   try {
     const report = await api.repairVersion(version.id);
     notify(`修复完成：校验 ${report.files} 个文件（完好的已跳过）`, "success");
@@ -299,10 +313,14 @@ async function applyIdEdit() {
       await api.renameVersion(editor.version.id, newId);
       notify(`已改名为「${newId}」`, "success");
     }
-    idEditor.value = null;
+    // 只关"还是当初那个"的弹层：大版本复制耗时几秒，期间玩家可能
+    // 关掉重开过，晚到的完成不能把新弹层误关掉
+    if (idEditor.value === editor) {
+      idEditor.value = null;
+      state.selectedVersion = newId;
+    }
     await refreshLocal();
     await refreshRemote();
-    state.selectedVersion = newId;
   } catch (e) {
     notify(errorText(e), "error");
   } finally {
@@ -325,12 +343,18 @@ function openBackups(version: LocalVersion) {
   void loadBackups();
 }
 
+// 列表请求代际号：快速切换不同版本的备份弹层时，
+// 慢的旧响应不能覆盖新目标（否则显示 B 的名字、列着 A 的备份）
+let backupsSeq = 0;
+
 async function loadBackups() {
   if (!backupTarget.value) return;
+  const seq = ++backupsSeq;
   try {
-    backups.value = await api.backupList(backupTarget.value.id);
+    const list = await api.backupList(backupTarget.value.id);
+    if (seq === backupsSeq) backups.value = list;
   } catch (e) {
-    notify(errorText(e), "error");
+    if (seq === backupsSeq) notify(errorText(e), "error");
   }
 }
 
@@ -491,37 +515,37 @@ async function installLoader(gameVersion: string, loader: string) {
         </span>
       </div>
       <div class="flex items-center gap-2">
-        <button class="btn-ghost !py-2 !text-xs" @click="refreshLocal">
+        <button class="btn-ghost btn-sm" @click="refreshLocal">
           <Icon name="refresh" :size="15" />
           刷新
         </button>
-        <button class="btn-outline !py-2 !text-xs" @click="openInstaller">
+        <button class="btn-outline btn-sm" @click="openInstaller">
           <Icon name="download" :size="15" />
           安装游戏…
         </button>
-        <button class="btn-primary !py-2 !text-xs" @click="openOnline">
+        <button class="btn-primary btn-sm" @click="openOnline">
           <Icon name="versions" :size="15" />
           版本列表
         </button>
       </div>
     </div>
 
-    <div class="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+    <div class="scroll-area min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
     <!-- 本地版本卡片 -->
     <div v-if="state.local.length > 0" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       <article
         v-for="version in state.local"
         :key="version.id"
-        class="card card-hover group flex flex-col gap-3 p-4"
+        class="card card-hover group flex flex-col gap-2.5 p-3.5 [content-visibility:auto] [contain-intrinsic-size:auto_200px]"
       >
         <div class="flex items-start justify-between gap-2">
           <div class="min-w-0">
             <div class="truncate text-sm font-bold text-ink-900" :title="version.id">
               {{ version.id }}
             </div>
-            <div class="mt-1 flex items-center gap-2">
+            <div class="mt-1 flex flex-wrap items-center gap-1.5">
               <span
-                class="chip"
+                class="chip whitespace-nowrap"
                 :class="
                   version.complete
                     ? 'bg-brand-500/[0.16] text-brand-200'
@@ -530,31 +554,37 @@ async function installLoader(gameVersion: string, loader: string) {
               >
                 {{ version.complete ? version.kind : "安装未完成" }}
               </span>
-              <span class="chip bg-surface-sunken text-ink-500">
+              <span class="chip whitespace-nowrap bg-surface-sunken text-ink-500">
                 Java {{ version.javaMajor }}
               </span>
-              <span class="chip bg-surface-sunken text-ink-500">
-                {{ humanSize(version.size) }}
+              <span
+                v-if="version.modCount > 0"
+                class="chip whitespace-nowrap bg-surface-sunken text-ink-500"
+              >
+                {{ version.modCount }} mod
               </span>
             </div>
           </div>
           <div
-            class="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-500/[0.16] text-brand-200 transition-transform duration-300 group-hover:scale-105"
+            class="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-500/[0.16] text-brand-200 transition-transform duration-300 ease-spring group-hover:scale-110"
           >
             <Icon name="package" :size="18" />
           </div>
         </div>
 
-        <div
-          class="truncate rounded-lg bg-surface-sunken px-2.5 py-1.5 font-mono text-[10px] text-ink-400"
-          :title="version.dir"
-        >
-          {{ version.dir }}
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-300" :title="version.dir">
+            {{ version.dir }}
+          </span>
+          <span class="shrink-0 font-mono text-[10px] text-ink-400">
+            {{ humanSize(version.size) }}
+          </span>
         </div>
 
+        <!-- 卡面只留「启动」一个主按钮，其余低频操作收进 ⋯ 菜单 -->
         <div class="flex gap-2">
           <button
-            class="btn-outline flex-1 !py-2 !text-xs"
+            class="btn-outline flex-1 btn-sm"
             :disabled="!version.complete"
             :title="version.complete ? '' : '安装未完成，请重新安装'"
             @click="startVersion(version.id)"
@@ -563,7 +593,7 @@ async function installLoader(gameVersion: string, loader: string) {
             选择并启动
           </button>
           <button
-            class="btn-ghost relative !px-2.5 !py-2 !text-xs"
+            class="btn-ghost relative !px-2.5 btn-sm"
             :title="version.hasSaves ? '备份 / 还原这个版本的存档' : '这个版本没有存档'"
             @click="openBackups(version)"
           >
@@ -575,54 +605,61 @@ async function installLoader(gameVersion: string, loader: string) {
               title="有存档"
             />
           </button>
-          <button
-            class="btn-ghost !px-2.5 !py-2 !text-xs"
-            title="把这个版本打包成 zip（导出实例）"
-            @click="openExport(version)"
-          >
-            导出
-          </button>
-          <div class="relative">
+          <div class="relative" data-ver-menu>
             <button
-              class="btn-ghost !px-2.5 !py-2 !text-xs"
-              title="复制 / 重命名"
+              class="btn-ghost !px-2.5 btn-sm"
+              title="更多操作"
               @click="toggleMenu(version.id)"
             >
               <Icon name="settings" :size="15" />
             </button>
             <div
               v-if="menuOpen === version.id"
-              class="absolute right-0 top-10 z-30 w-36 rounded-xl border border-line bg-surface p-1 shadow-pop"
+              class="absolute right-0 top-10 z-30 w-40 origin-top-right animate-pop rounded-xl border border-line bg-surface p-1 shadow-pop"
             >
               <button
-                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-veil/[0.06] hover:text-ink-900"
+                title="把这个版本打包成 zip（导出实例）"
+                @click="openExport(version)"
+              >
+                导出实例…
+              </button>
+              <button
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-veil/[0.06] hover:text-ink-900"
                 @click="startCopy(version)"
               >
                 复制版本…
               </button>
               <button
-                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-veil/[0.06] hover:text-ink-900"
                 @click="startRename(version)"
               >
                 重命名…
               </button>
               <button
-                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-white/[0.06] hover:text-white"
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-veil/[0.06] hover:text-ink-900"
                 title="校验并补齐缺失/损坏的游戏文件，不碰存档和 mod"
                 @click="repairVersion(version)"
               >
                 修复文件…
               </button>
+              <button
+                class="w-full rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-ink-700 transition hover:bg-veil/[0.06] hover:text-ink-900"
+                title="管理这个版本已安装的模组"
+                @click="menuOpen = ''; state.selectedVersion = version.id; state.view = 'mods'"
+              >
+                管理模组…
+              </button>
+              <button
+                class="mt-1 w-full rounded-lg border-t border-line px-3 py-2 text-left text-[12px] font-semibold text-rose-400 transition hover:bg-rose-500/[0.12] hover:text-rose-300"
+                title="删除这个版本（有存档会先备份）"
+                :disabled="deleting === version.id"
+                @click="menuOpen = ''; remove(version)"
+              >
+                删除版本…
+              </button>
             </div>
           </div>
-          <button
-            class="btn-ghost !px-2.5 !py-2 !text-xs text-rose-400/80 hover:bg-rose-500/[0.14] hover:text-rose-300"
-            title="删除这个版本"
-            :disabled="deleting === version.id"
-            @click="remove(version)"
-          >
-            <Icon name="trash" :size="15" />
-          </button>
         </div>
       </article>
     </div>
@@ -680,8 +717,8 @@ async function installLoader(gameVersion: string, loader: string) {
             <label class="block text-xs font-semibold text-ink-500">
               游戏版本
               <select v-model="installerVersion" class="field mt-1.5 w-full" :disabled="installerBusy" @change="loadInstallerLoaderVersions">
-                <option v-for="version in state.remote.filter(v => v.kind === 'release')" :key="version.id" :value="version.id">{{ version.id }}{{ version.id === state.latest.release ? '（最新正式版）' : '' }}</option>
-                <option v-for="version in state.remote.filter(v => v.kind !== 'release')" :key="version.id" :value="version.id">{{ version.id }}（{{ version.kind }}）</option>
+                <option v-for="version in releaseVersions" :key="version.id" :value="version.id">{{ version.id }}{{ version.id === state.latest.release ? '（最新正式版）' : '' }}</option>
+                <option v-for="version in nonReleaseVersions" :key="version.id" :value="version.id">{{ version.id }}（{{ version.kind }}）</option>
                 <option v-if="!state.remote.some(v => v.id === '1.21.1')" value="1.21.1">1.21.1</option>
               </select>
             </label>
@@ -776,7 +813,7 @@ async function installLoader(gameVersion: string, loader: string) {
             placeholder="搜索版本，例如 1.20.1"
           />
         </div>
-        <button class="btn-ghost !py-2 !text-xs" :disabled="loadingRemote" @click="loadRemote">
+        <button class="btn-ghost btn-sm" :disabled="loadingRemote" @click="loadRemote">
           <Icon
             name="refresh"
             :size="15"
@@ -784,17 +821,32 @@ async function installLoader(gameVersion: string, loader: string) {
           />
           {{ loadingRemote ? "加载中…" : "刷新清单" }}
         </button>
-        <button class="btn-ghost !py-2 !text-xs" @click="showOnline = false">
+        <button class="btn-ghost btn-sm" @click="showOnline = false">
           <Icon name="close" :size="15" />
           收起
         </button>
       </div>
 
-      <div class="max-h-[420px] divide-y divide-line/80 overflow-y-auto">
+      <div class="max-h-[420px] divide-y divide-line overflow-y-auto">
+        <!-- 清单加载中：骨架行（8 行，模拟真实行高） -->
+        <div
+          v-if="loadingRemote && filtered.length === 0"
+          class="divide-y divide-line"
+        >
+          <div
+            v-for="i in 8"
+            :key="`sk-${i}`"
+            class="flex items-center gap-3 px-4 py-2.5"
+          >
+            <div class="skeleton h-5 w-[74px]"></div>
+            <div class="skeleton h-4 flex-1"></div>
+            <div class="skeleton h-4 w-16"></div>
+          </div>
+        </div>
         <div
           v-for="version in filtered"
           :key="version.id"
-          class="flex items-center gap-3 px-4 py-2.5 transition-colors duration-150 hover:bg-white/[0.05]"
+          class="flex items-center gap-3 px-4 py-2.5 transition-colors duration-150 hover:bg-veil/[0.05]"
         >
           <span
             class="chip w-[74px] justify-center"
@@ -897,7 +949,7 @@ async function installLoader(gameVersion: string, loader: string) {
     <div
       v-if="idEditor"
       class="fixed inset-0 z-[75] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
-      @click.self="idEditor = null"
+      @click.self="!idBusy && (idEditor = null)"
     >
       <div class="w-full max-w-sm rounded-2xl border border-line bg-surface p-5 shadow-pop">
         <div class="text-sm font-extrabold text-ink-900">
@@ -921,10 +973,10 @@ async function installLoader(gameVersion: string, loader: string) {
           }}
         </p>
         <div class="mt-4 flex justify-end gap-2">
-          <button class="btn-ghost !py-2 !text-xs" :disabled="idBusy" @click="idEditor = null">
+          <button class="btn-ghost btn-sm" :disabled="idBusy" @click="idEditor = null">
             取消
           </button>
-          <button class="btn-primary !py-2 !text-xs" :disabled="idBusy" @click="applyIdEdit">
+          <button class="btn-primary btn-sm" :disabled="idBusy" @click="applyIdEdit">
             <Icon :name="idBusy ? 'refresh' : 'check'" :size="14" :class="idBusy ? 'animate-spin' : ''" />
             {{ idBusy ? "处理中…" : idEditor.mode === "copy" ? "复制" : "改名" }}
           </button>
@@ -936,7 +988,7 @@ async function installLoader(gameVersion: string, loader: string) {
     <div
       v-if="backupTarget"
       class="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-6 backdrop-blur-sm"
-      @click.self="backupTarget = null"
+      @click.self="!backupBusy && (backupTarget = null)"
     >
       <div class="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-pop">
         <div class="flex items-start justify-between gap-3">
@@ -946,7 +998,12 @@ async function installLoader(gameVersion: string, loader: string) {
               {{ backupTarget.id }}
             </p>
           </div>
-          <button class="btn-ghost !px-2 !py-1.5" title="关闭" @click="backupTarget = null">
+          <button
+            class="btn-ghost !px-2 !py-1.5"
+            title="关闭"
+            :disabled="backupBusy"
+            @click="backupTarget = null"
+          >
             <Icon name="close" :size="15" />
           </button>
         </div>
@@ -955,7 +1012,7 @@ async function installLoader(gameVersion: string, loader: string) {
           <div
             v-for="item in backups"
             :key="item.file"
-            class="flex items-center gap-3 rounded-xl border border-line bg-white/[0.02] px-3 py-2"
+            class="flex items-center gap-3 rounded-xl border border-line bg-veil/[0.02] px-3 py-2"
           >
             <div class="min-w-0 flex-1">
               <div class="truncate text-xs font-semibold text-ink-900">
@@ -1044,10 +1101,10 @@ async function installLoader(gameVersion: string, loader: string) {
         </p>
 
         <div class="mt-4 flex justify-end gap-2">
-          <button class="btn-ghost !py-2 !text-xs" :disabled="exporting" @click="closeExport">
+          <button class="btn-ghost btn-sm" :disabled="exporting" @click="closeExport">
             取消
           </button>
-          <button class="btn-primary !py-2 !text-xs" :disabled="exporting" @click="exportNow">
+          <button class="btn-primary btn-sm" :disabled="exporting" @click="exportNow">
             <Icon
               :name="exporting ? 'refresh' : 'download'"
               :size="15"
